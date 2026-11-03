@@ -1205,6 +1205,17 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
       return await environmentsSvc.releaseLease(input.lease.id, input.status);
     },
 
+    async retryPendingSandboxTeardown({ lease }) {
+      // An SSH lease is bookkeeping for a persistent host; there is no sandbox
+      // to destroy. Without this the cleanup sweep failed every attempt with
+      // "does not support orphan sandbox teardown" and escalated to an operator,
+      // blocking every wake of the lease's issue. Process ownership is checked
+      // separately before another run is admitted, as for local leases.
+      if (lease.provider !== "ssh") {
+        throw new Error("SSH lease cleanup cannot release a non-SSH provider resource.");
+      }
+    },
+
     async realizeWorkspace(input) {
       const record = buildWorkspaceRealizationRecordFromDriverInput({
         environment: input.environment,
