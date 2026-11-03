@@ -43,6 +43,10 @@ export function legacyExecutionNeedsReconciliation(
   // a resource wait, not a failed provider attempt or permission to replay work.
   if (run.status === "cancelled" && (run.errorCode === "ai_connection_busy" || run.errorCode === "ai_connection_pool_exhausted") &&
       evidence?.kind === "ai_connection_wait" && evidence.providerWorkStarted === false) return false;
+  // A disposition repair suppressed at admission never reached the provider.
+  // Holding it blocks every later wake of the issue, including manual ones.
+  if (run.status === "cancelled" && run.errorCode === "legacy_disposition_repair_suppressed" &&
+      evidence?.kind === "disposition_repair_suppressed" && evidence.providerWorkStarted === false) return false;
   if (run.status === "cancelled" && run.errorCode === "workspace_busy" &&
       evidence?.kind === "workspace_wait" && evidence.providerWorkStarted === false) return false;
   // Setup owns the bounded retry budget for temporary workspace scans. Its

@@ -107,3 +107,14 @@ it("recognizes only an unclaimed pre-dispatch review wait receipt", () => {
     { resultJson: { ...run.resultJson, workspaceRestoreFailure: "restore_unsafe_archive" } },
   ]) expect(isPreDispatchReviewWait({ ...run, ...patch })).toBe(false);
 });
+
+it("does not hold a disposition repair suppressed before provider dispatch", () => {
+  const run = { runtimeMode: "legacy", status: "cancelled", errorCode: "legacy_disposition_repair_suppressed",
+    resultJson: { executionRecovery: { kind: "disposition_repair_suppressed", providerWorkStarted: false } } };
+  expect(legacyExecutionNeedsReconciliation(run)).toBe(false);
+  // Without the admission evidence the outcome stays unknown and is held.
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {} })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...run, resultJson: {
+    executionRecovery: { kind: "disposition_repair_suppressed", providerWorkStarted: true },
+  } })).toBe(true);
+});

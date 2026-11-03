@@ -474,6 +474,18 @@ describeEmbeddedPostgres("environmentRuntimeService", () => {
     return { pluginId, companyId, agentId, environment, runId, executionWorkspaceId, reusableLease };
   }
 
+  it("settles a pending-cleanup SSH lease without a sandbox teardown", async () => {
+    // A persistent SSH host has nothing to destroy; the sweep must not fail and
+    // escalate to an operator, which blocks every wake of the lease's issue.
+    const sshLease = {
+      id: randomUUID(), provider: "ssh", providerLeaseId: "ssh://agent@100.64.0.1:22/workspace",
+      status: "pending_cleanup", leasePolicy: "ephemeral", metadata: { driver: "ssh", host: "100.64.0.1" },
+    } as unknown as Parameters<typeof runtime.retryPendingSandboxTeardown>[0]["lease"];
+    await expect(runtime.retryPendingSandboxTeardown({ environment: null, lease: sshLease })).resolves.toBeUndefined();
+    await expect(runtime.retryPendingSandboxTeardown({ environment: null,
+      lease: { ...sshLease, provider: "fake-plugin" } })).rejects.toThrow("non-SSH provider");
+  });
+
   it("acquires and resumes a reusable lease after a task changes from per-turn to warm", async () => {
     const seeded = await seedReusablePluginSandboxLease("paperclip_runner");
     await environmentService(db).releaseLease(seeded.reusableLease.id, "expired");
