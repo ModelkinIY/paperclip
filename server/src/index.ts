@@ -1,6 +1,7 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
 import { tickWeeklyPace } from "./services/weekly-pace.js";
+import { readDeployDrain } from "./services/deploy-drain.js";
 import { registerNativeRuntimeResponseDelivery } from "./services/native-runtime/native-runtime-response-delivery.js";
 import { attentionRetentionService, registerAttentionRetentionWork } from "./services/attention-retention.js";
 import { registerRoutineExecutionStatusWork } from "./services/routine-execution-status-work.js";
@@ -1358,6 +1359,22 @@ async function startServerWithDatabaseTeardown(
     }));
   }, 120_000);
   weeklyPaceTimer.unref?.();
+  // inferdyne fork: resume queues once a deploy drain is lifted (services/deploy-drain.ts).
+  let deployDrainWasActive = readDeployDrain().active;
+  const deployDrainTimer = setInterval(() => {
+    const active = readDeployDrain().active;
+    if (deployDrainWasActive && !active && !heartbeatSchedulerStopped && !isWarmStandby()) {
+      logger.info("deploy drain lifted, resuming queued runs");
+      trackHeartbeatSchedulerWork(accountingHeartbeat.resumeQueuedRunsAfterDrain().catch(err => {
+        logger.error({ err }, "failed to resume queued runs after deploy drain");
+      }));
+    } else if (!deployDrainWasActive && active) {
+      logger.info("deploy drain active, holding new runs");
+    }
+    deployDrainWasActive = active;
+  }, 15_000);
+  deployDrainTimer.unref?.();
+  server.on("close", () => clearInterval(deployDrainTimer));
   server.on("close", () => clearInterval(weeklyPaceTimer));
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });

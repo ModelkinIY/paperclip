@@ -21,6 +21,7 @@ import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modul
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { shouldHoldNewRunForWeeklyPace } from "../weekly-pace.js";
+import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -2104,6 +2105,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       // inferdyne fork: pace-held agents keep new runs queued while the weekly
       // window is ahead of an even pace; started runs are never held.
       if (queuedRuns.every(run => !run.startedAt) && shouldHoldNewRunForWeeklyPace(agent)) return [];
+      // inferdyne fork: a planned board upgrade holds every new run (deploy/upgrade.sh).
+      if (queuedRuns.every(run => !run.startedAt) && shouldHoldNewRunForDeploy()) return [];
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
