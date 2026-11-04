@@ -2347,24 +2347,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
   });
 
-  it("defers, not drops, a review handoff assignment while a terminal predecessor's lease is still releasing", async () => {
-    // A review-stage participant wake arrives seconds before the executor's
-    // lease cleanup finishes. A skipped receipt is never retried, so the
-    // reviewer was never woken; a deferred receipt is retried by the sweep.
-    const { companyId, agentId, issueId, runId } = await seedRunFixture({ agentStatus: "idle", runStatus: "interrupted" });
-    await db.update(heartbeatRuns).set({ resultJson: { conversationContinuation: "continue_conversation_v1" } }).where(eq(heartbeatRuns.id, runId));
-    await db.insert(environmentLeases).values({ companyId, issueId, heartbeatRunId: runId, status: "active" });
-    expect(await getExecutionBlocker(db, companyId, issueId)).toMatchObject({ runId, cause: "execution_owner_active" });
-    await heartbeatService(db).wakeup(agentId, { source: "assignment", reason: "execution_review_requested",
-      requestedByActorType: "system", payload: { issueId },
-      contextSnapshot: { issueId, wakeReason: "execution_review_requested" } });
-    const wakes = await db.select().from(agentWakeupRequests).where(and(
-      eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, agentId),
-      sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`));
-    expect(wakes.map(wake => wake.status)).toContain("deferred_issue_execution");
-    expect(wakes.map(wake => wake.status)).not.toContain("skipped");
-  });
-
   it("keeps an unsafe Stop blocked when recovery sees a deferred human comment", async () => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress", runStatus: "cancelled",

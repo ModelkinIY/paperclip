@@ -3428,15 +3428,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 requestId: executionWaitRequestId }, condition, { replace: true });
               return { kind: "deferred" as const, admitted: true };
             }
-            // An assignment (e.g. a handoff to the review stage) that lands while the
-            // previous owner is still exiting and releasing its environment lease is
-            // transient: keep it as a deferred receipt so the deferred receipt sweep
-            // retries it once cleanup finishes. Dropping it as a skipped receipt left
-            // review participants unwoken after a handoff. Recovery/automation wakes
-            // keep their existing handling.
-            const transientOwnerHandoff =
-              source === "assignment" && executionBlocker.cause === "execution_owner_active";
-            if (durableRequest || wakeCommentId || transientOwnerHandoff ||
+            if (durableRequest || wakeCommentId ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
                 readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
               await notifyDeferredExecutionWork(tx, { companyId: agent.companyId });

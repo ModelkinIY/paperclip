@@ -330,6 +330,7 @@ import {
   and,
   eq,
   exists,
+  gte,
   inArray,
   isNull,
   notInArray,
@@ -3983,6 +3984,11 @@ export function heartbeatService(
           logger.error({ err, runId: run.id }, "failed to settle explicit continuation after cleanup");
         });
       }
+      if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
+        await rewakeHandoffAssigneeSkippedDuringCleanup(latestRun).catch(err => {
+          logger.warn({ err, runId: run.id }, "failed to re-wake handoff assignee after execution cleanup");
+        });
+      }
       if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
         const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
           eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
@@ -4013,6 +4019,44 @@ export function heartbeatService(
         await startNextQueuedRunForAgent(run.agentId);
       }
     }
+  }
+
+  // A handoff (e.g. to the review stage) wakes the new assignee while this run is
+  // still exiting and holding its environment lease. That wake is admitted as a
+  // skipped receipt (the previous owner is active) and nothing retries it, so the
+  // reviewer was never woken. Once cleanup has finished and the owner is gone,
+  // wake the new assignee again if its only wake since this run started was skipped.
+  async function rewakeHandoffAssigneeSkippedDuringCleanup(
+    latestRun: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "agentId" | "startedAt" | "createdAt" | "contextSnapshot">,
+  ) {
+    const issueId = readNonEmptyString(latestRun.contextSnapshot?.issueId);
+    if (!issueId) return;
+    const [issue] = await db.select({ assigneeAgentId: issues.assigneeAgentId, executionRunId: issues.executionRunId,
+      status: issues.status }).from(issues)
+      .where(and(eq(issues.companyId, latestRun.companyId), eq(issues.id, issueId)));
+    const assigneeAgentId = issue?.assigneeAgentId;
+    if (!assigneeAgentId || assigneeAgentId === latestRun.agentId || issue.executionRunId) return;
+    if (["done", "cancelled", "backlog"].includes(issue.status)) return;
+    const since = latestRun.startedAt ?? latestRun.createdAt;
+    const wakes = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, latestRun.companyId), eq(agentWakeupRequests.agentId, assigneeAgentId),
+      sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`, gte(agentWakeupRequests.createdAt, since),
+    ));
+    if (!wakes.length || wakes.some(wake => wake.status !== "skipped")) return;
+    const [live] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, latestRun.companyId), eq(heartbeatRuns.agentId, assigneeAgentId),
+      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+    )).limit(1);
+    if (live) return;
+    await trackWakeup(assigneeAgentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "execution_review_requested",
+      payload: { issueId },
+      requestedByActorType: "system",
+      requestedByActorId: null,
+    });
   }
 
   async function stopInvocationsForAgents(agentIds: string[], reason: string) {
