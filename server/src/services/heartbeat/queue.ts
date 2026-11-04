@@ -3428,7 +3428,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 requestId: executionWaitRequestId }, condition, { replace: true });
               return { kind: "deferred" as const, admitted: true };
             }
-            if (durableRequest || wakeCommentId ||
+            // An active previous owner (process exiting, lease still releasing) is
+            // transient: keep the wake as a deferred receipt so the deferred
+            // receipt sweep retries it once cleanup finishes. Dropping it as a
+            // skipped receipt left review participants unwoken after a handoff.
+            if (durableRequest || wakeCommentId || executionBlocker.cause === "execution_owner_active" ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
                 readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
               await notifyDeferredExecutionWork(tx, { companyId: agent.companyId });
