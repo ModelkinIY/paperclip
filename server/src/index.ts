@@ -1,4 +1,6 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
+import { aiConnectionService } from "./services/ai-connections.js";
+import { tickWeeklyPace } from "./services/weekly-pace.js";
 import { registerNativeRuntimeResponseDelivery } from "./services/native-runtime/native-runtime-response-delivery.js";
 import { attentionRetentionService, registerAttentionRetentionWork } from "./services/attention-retention.js";
 import { registerRoutineExecutionStatusWork } from "./services/routine-execution-status-work.js";
@@ -1344,6 +1346,19 @@ async function startServerWithDatabaseTeardown(
     }));
   });
   server.on("close", () => { void taskDrainExpiryWork.stop(); });
+  // inferdyne fork: weekly pace hold (services/weekly-pace.ts).
+  const weeklyPaceUsage = aiConnectionService(db as any);
+  const weeklyPaceTimer = setInterval(() => {
+    if (heartbeatSchedulerStopped || isWarmStandby()) return;
+    trackHeartbeatSchedulerWork(tickWeeklyPace(db as any, {
+      usage: { list: (c, u) => weeklyPaceUsage.list(c, u) as any, probeUsage: (c, u, id) => weeklyPaceUsage.probeUsage(c, u, id) as any },
+      resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
+    }).catch(err => {
+      logger.error({ err }, "weekly pace tick failed");
+    }));
+  }, 120_000);
+  weeklyPaceTimer.unref?.();
+  server.on("close", () => clearInterval(weeklyPaceTimer));
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
   if (runEvidenceMigrationWork) trackHeartbeatSchedulerWork(runEvidenceMigrationWork.ready);

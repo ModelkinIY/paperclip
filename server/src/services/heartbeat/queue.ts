@@ -20,6 +20,7 @@ import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
+import { shouldHoldNewRunForWeeklyPace } from "../weekly-pace.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -2100,6 +2101,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
       if (queuedRuns.every(run => !run.startedAt) && !await canStartNewExternalBotWork(agent)) return [];
+      // inferdyne fork: pace-held agents keep new runs queued while the weekly
+      // window is ahead of an even pace; started runs are never held.
+      if (queuedRuns.every(run => !run.startedAt) && shouldHoldNewRunForWeeklyPace(agent)) return [];
 
       const dependencyReadiness = await listQueuedRunDependencyReadiness(
         agent.companyId,
