@@ -1720,6 +1720,15 @@ function withAgentCommentAuthorizationMetadata(
  * Only comments produced through an explicit agent write surface are authored
  * for the external conversation and therefore eligible for auto-publication.
  */
+/** inferdyne fork: PAPERCLIP_DEFAULT_PROJECTS="<companyId>=<projectId>,…". */
+export function defaultProjectForCompany(companyId: string, raw = process.env.PAPERCLIP_DEFAULT_PROJECTS): string | null {
+  for (const pair of (raw ?? "").split(",")) {
+    const [c, p] = pair.split("=").map(v => v.trim());
+    if (c === companyId && p && /^[0-9a-f-]{36}$/i.test(p)) return p;
+  }
+  return null;
+}
+
 export function isExplicitExternalAgentComment(
   metadata: IssueCommentMetadata | null | undefined,
 ): boolean {
@@ -10198,6 +10207,16 @@ export function issueService(db: Db) {
       // A prompt prefix is not a task identity: distinct requests can share it.
       const deduplicateByTitle = allowDuplicate === false && !titleNeedsGeneration;
       issueData.title = resolvedTitle;
+      // inferdyne fork: a task without a project gets its parent's project, else
+      // the company default from PAPERCLIP_DEFAULT_PROJECTS ("<companyId>=<projectId>,…").
+      if (!issueData.projectId) {
+        const parentProjectId = issueData.parentId
+          ? (await dbOrTx.select({ projectId: issues.projectId }).from(issues)
+              .where(and(eq(issues.id, issueData.parentId), eq(issues.companyId, companyId))))[0]?.projectId ?? null
+          : null;
+        const fallback = parentProjectId ?? defaultProjectForCompany(companyId);
+        if (fallback) issueData.projectId = fallback;
+      }
       const isolatedWorkspacesEnabled = (
         await instanceSettings.getExperimental()
       ).enableIsolatedWorkspaces;
