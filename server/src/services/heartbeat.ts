@@ -3990,8 +3990,18 @@ export function heartbeatService(
         });
       }
       if (latestRun?.runtimeMode === "legacy" && isHeartbeatRunTerminalStatus(latestRun.status)) {
+        // A reassignment that lands while this run is still releasing its lease
+        // defers the NEW assignee's wake on this issue. Look for it too, or it
+        // waits forever: nothing else promotes another agent's deferred wake.
+        const pendingAgentIds = [run.agentId];
+        const pendingIssueId = readNonEmptyString(latestRun.contextSnapshot?.issueId);
+        if (pendingIssueId) {
+          const [current] = await db.select({ assigneeAgentId: issues.assigneeAgentId }).from(issues)
+            .where(and(eq(issues.companyId, run.companyId), eq(issues.id, pendingIssueId)));
+          if (current?.assigneeAgentId && current.assigneeAgentId !== run.agentId) pendingAgentIds.push(current.assigneeAgentId);
+        }
         const [pending] = await db.select({ id: agentWakeupRequests.id, payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
-          eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+          eq(agentWakeupRequests.companyId, run.companyId), inArray(agentWakeupRequests.agentId, pendingAgentIds),
           eq(agentWakeupRequests.status, "deferred_issue_execution"),
           sql`${agentWakeupRequests.payload}->>'issueId' = ${String(latestRun.contextSnapshot?.issueId)}`,
         )).limit(1);
