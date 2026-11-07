@@ -94,6 +94,16 @@ describe("decidePreDrain", () => {
       expected: { kind: "released" },
     },
     {
+      name: "proceed: an acknowledged cancellation of a previous owner after reassignment to another agent",
+      facts: { ...basePreDrainFacts, executionCancellationAcknowledged: true, assigneeAgentMatchesRunAgent: false },
+      expected: { kind: "proceed" },
+    },
+    {
+      name: "released: an acknowledged cancellation after reassignment to a user",
+      facts: { ...basePreDrainFacts, executionCancellationAcknowledged: true, assigneeAgentMatchesRunAgent: false, hasAssigneeUser: true },
+      expected: { kind: "released" },
+    },
+    {
       name: "proceed: none of the pre-drain conditions apply",
       facts: basePreDrainFacts,
       expected: { kind: "proceed" },

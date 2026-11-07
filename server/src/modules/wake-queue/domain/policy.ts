@@ -112,7 +112,10 @@ export function decidePreDrain(facts: PreDrainFacts): PreDrainDecision {
     return { kind: "released" };
   }
 
-  if (facts.executionCancellationAcknowledged) {
+  // An acknowledged Stop keeps the stopped agent from restarting itself. When
+  // the issue was reassigned (the run was cancelled for the handoff), the queued
+  // work belongs to the new assignee and must still be promoted.
+  if (facts.executionCancellationAcknowledged && (facts.assigneeAgentMatchesRunAgent || facts.hasAssigneeUser)) {
     return { kind: "released" };
   }
 
