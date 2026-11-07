@@ -118,3 +118,16 @@ it("does not hold a disposition repair suppressed before provider dispatch", () 
     executionRecovery: { kind: "disposition_repair_suppressed", providerWorkStarted: true },
   } })).toBe(true);
 });
+
+it("does not hold a queued run withheld at the gate after reassignment, only while it never started", () => {
+  const withheld = {
+    runtimeMode: "legacy", status: "cancelled", errorCode: "issue_assignee_changed",
+    startedAt: null, processPid: null, processStartedAt: null,
+    resultJson: { stopReason: "issue_assignee_changed", timeoutSource: "stale_queued_run_gate" },
+  };
+  expect(legacyExecutionNeedsReconciliation(withheld)).toBe(false);
+  expect(legacyExecutionNeedsReconciliation({ ...withheld, startedAt: new Date() })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...withheld, processPid: 42 })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...withheld, resultJson: {} })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...withheld, startedAt: undefined })).toBe(true);
+});

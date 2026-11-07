@@ -43,7 +43,7 @@ export const legacyReconciliationRunFields = {
 
 /** Error families describe availability, not whether earlier actions happened. */
 export function legacyExecutionNeedsReconciliation(
-  run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot">>,
+  run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "startedAt" | "processPid" | "processStartedAt">>,
 ): boolean {
   if (
     run.runtimeMode === "native" ||
@@ -71,6 +71,12 @@ export function legacyExecutionNeedsReconciliation(
   // Holding it blocks every later wake of the issue, including manual ones.
   if (run.status === "cancelled" && run.errorCode === "legacy_disposition_repair_suppressed" &&
       evidence?.kind === "disposition_repair_suppressed" && evidence.providerWorkStarted === false) return false;
+  // A queued run withheld at the execution gate because its issue was handed to
+  // another agent never reached the provider. Holding it would strand the new
+  // assignee's deferred wake behind a run that did nothing.
+  if (run.status === "cancelled" && run.errorCode === "issue_assignee_changed" &&
+      run.resultJson?.timeoutSource === "stale_queued_run_gate" &&
+      run.startedAt === null && run.processPid === null && run.processStartedAt === null) return false;
   if (run.status === "cancelled" && run.errorCode === "workspace_busy" &&
       evidence?.kind === "workspace_wait" && evidence.providerWorkStarted === false) return false;
   // Setup owns the bounded retry budget for temporary workspace scans. Its
