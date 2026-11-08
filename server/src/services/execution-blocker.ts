@@ -93,7 +93,13 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 }
 
 /** Resolved recovery bookkeeping can still carry an effective no-replay hold. */
+/** inf fork: PAPERCLIP_DISABLE_EXECUTION_HOLDS=1 turns recovery actions into history only. */
+export function executionHoldsDisabled() {
+  return process.env.PAPERCLIP_DISABLE_EXECUTION_HOLDS === "1";
+}
+
 export function executionBlockerPredicate() {
+  if (executionHoldsDisabled()) return sql`false`;
   return and(
     not(conversationRecoveryActionPredicate()!),
     not(preDispatchExecutionWaitRecoveryActionPredicate()),
@@ -113,6 +119,7 @@ export function nativeExecutionRecoveryActionPredicate() {
 }
 
 export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
+  if (executionHoldsDisabled()) return null;
   const [conversation] = await db.select({ agentId: issues.conversationAgentId,
     boundaryId: issues.conversationBoundaryCommentId, status: issues.status,
     assigneeAgentId: issues.assigneeAgentId, statusVersion: issues.statusVersion,
