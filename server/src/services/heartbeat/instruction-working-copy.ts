@@ -211,6 +211,11 @@ export function createHeartbeatInstructionWorkingCopy(input: InstructionWorkingC
         }
         runtimeConfig = { ...runtimeConfig, instructionsFilePath: path.join(instructionCopy.localRoot, instructionCopy.entryFile) };
         if (isAgentDirectoryCopy(instructionCopy)) {
+          // The agent reads its bundle where it runs. In a remote sandbox that
+          // is the synchronized execution root, not the controller's copy.
+          if (instructionCopy.executionRoot !== instructionCopy.localRoot) {
+            runtimeConfig = { ...runtimeConfig, instructionsExecutionFilePath: path.posix.join(instructionCopy.executionRoot, instructionCopy.entryFile) };
+          }
           const workspace = parseObject(context.paperclipWorkspace);
           context.paperclipWorkspace = { ...workspace, agentHome: instructionCopy.executionRoot,
             // Keep the pre-existing permission root stable for ACP session

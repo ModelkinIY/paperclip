@@ -231,6 +231,39 @@ describe("claude remote execution", () => {
     }));
   });
 
+  it("names the sandbox copy of the instruction bundle, not the controller path, in the run prompt", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const instructionsPath = path.join(rootDir, "live", "AGENTS.md");
+    await mkdir(path.dirname(instructionsPath), { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    await writeFile(instructionsPath, "Read ./task-record.md.\n", "utf8");
+    const remoteBundle = "/remote/workspace/.paperclip-runtime/agent-files/agent-1/run-1/AGENTS.md";
+
+    await execute({
+      runId: "run-1",
+      agent: { id: "agent-1", companyId: "company-1", name: "Claude Coder", adapterType: "claude_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { engine: "cli", command: "claude", instructionsFilePath: instructionsPath, instructionsExecutionFilePath: remoteBundle },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary", workspaceId: "workspace-1" } },
+      executionTransport: {
+        remoteExecution: {
+          host: "127.0.0.1", port: 2222, username: "fixture", remoteWorkspacePath: "/remote/workspace",
+          remoteCwd: "/remote/workspace", privateKey: "PRIVATE KEY", knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+          strictHostKeyChecking: true,
+        },
+      },
+      onLog: async () => {},
+    });
+
+    const stdin = (runChildProcess.mock.calls.find(call => !call[2].includes("--version")) as unknown as
+      [string, string, string[], { stdin?: string }])[3]?.stdin ?? "";
+    expect(stdin).toContain(`were loaded from ${remoteBundle}.`);
+    expect(stdin).toContain("Resolve any relative file references from /remote/workspace/.paperclip-runtime/agent-files/agent-1/run-1/.");
+    expect(stdin).not.toContain(instructionsPath);
+  });
+
   it("does not resume saved Claude sessions for remote SSH execution without a matching remote identity", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-claude-remote-resume-"));
     cleanupDirs.push(rootDir);

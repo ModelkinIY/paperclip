@@ -2861,6 +2861,7 @@ export async function buildEffectiveRunSessionConfigMetadata(input: {
   if (input.managedInstructions) {
     delete effectiveAdapterConfig.instructionsRootPath;
     delete effectiveAdapterConfig.instructionsFilePath;
+    delete effectiveAdapterConfig.instructionsExecutionFilePath;
   }
   // A selected immutable skill version is its identity; source is merely its
   // disposable projection. Unversioned/local skills retain their path boundary.

@@ -462,7 +462,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const hasExplicitClaudeConfigDir =
     typeof configEnv.CLAUDE_CONFIG_DIR === "string" && configEnv.CLAUDE_CONFIG_DIR.trim().length > 0;
   const instructionsFilePath = asString(config.instructionsFilePath, "").trim();
-  const instructionsFileDir = instructionsFilePath ? `${path.dirname(instructionsFilePath)}/` : "";
+  // Where the agent itself sees the bundle (a remote sandbox has its own copy).
+  const instructionsVisiblePath = asString(config.instructionsExecutionFilePath, "").trim() || instructionsFilePath;
+  const instructionsFileDir = instructionsVisiblePath ? `${path.posix.dirname(instructionsVisiblePath)}/` : "";
   const runtimeConfig = await buildClaudeRuntimeConfig({
     agentIdentity: ctx.agentIdentity,
     runId,
@@ -517,7 +519,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     try {
       const instructionsContent = await fs.readFile(instructionsFilePath, "utf-8");
       instructionsPathDirective =
-        `Agent instructions for this run were loaded from ${instructionsFilePath}. ` +
+        `Agent instructions for this run were loaded from ${instructionsVisiblePath}. ` +
         `Resolve any relative file references from ${instructionsFileDir}. ` +
         `This base directory is authoritative for sibling instruction files such as ` +
         `./HEARTBEAT.md, ./SOUL.md, and ./TOOLS.md; do not resolve those from the parent agent directory. ` +
