@@ -181,6 +181,7 @@ import {
 import { trackAgentTaskCompleted } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { isUniqueViolation } from "../db-errors.js";
+import { attachPodMutexStates, enforcePodMutexOnIssueWrite, issueLabelIds } from "../services/pod-mutex-issue-guard.js";
 import type { StorageService } from "../storage/types.js";
 import { validate, validateIssueMutationBody } from "../middleware/validate.js";
 import * as serviceIndex from "../services/index.js";
@@ -9514,13 +9515,18 @@ export function issueRoutes(
     const visibleMentionedProjects = mentionedProjects.filter((_, index) => mentionedProjectVisibility[index]);
     // Recovery revalidation may change the blocker; read it afterwards.
     const executionBlocker = await timing.time("execution_blocker", () => getExecutionBlocker(db, issue.companyId, issue.id));
+    // inferdyne fork: pod mutex state (holder / waiting) on the detail.
+    const [podMutexDecorated] = await attachPodMutexStates(db, issue.companyId, [{
+      id: issue.id, status: issue.status, ...(blockerAttention ? { blockerAttention } : {}),
+    }]);
     res.setHeader("Server-Timing", timing.header());
     res.json({
       ...issue,
       ...inboxArchiveFields,
       goalId: goal?.id ?? issue.goalId,
       ancestors,
-      ...(blockerAttention ? { blockerAttention } : {}),
+      ...(podMutexDecorated?.blockerAttention ? { blockerAttention: podMutexDecorated.blockerAttention } : {}),
+      podMutex: (podMutexDecorated as { podMutex?: unknown } | undefined)?.podMutex ?? null,
       ...(reviewAttention ? { reviewAttention } : {}),
       successfulRunHandoff: successfulRunHandoffStates.get(issue.id) ?? null,
       executionBlocker,
@@ -12738,6 +12744,23 @@ export function issueRoutes(
           deduplicationReason = reason;
         },
       };
+      // inferdyne fork: pod mutex (services/pod-mutex-issue-guard.ts).
+      await enforcePodMutexOnIssueWrite(db, {
+        kind: req.actor.type === "board" ? "board" : req.actor.type === "agent" ? "agent" : "other",
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+      }, {
+        companyId,
+        issueId: null,
+        before: null,
+        after: {
+          status: typeof createBody.status === "string" ? createBody.status : "backlog",
+          parentId: (createBody.parentId as string | null | undefined) ?? null,
+          labelIds: Array.isArray(createBody.labelIds) ? (createBody.labelIds as string[]) : [],
+        },
+      });
       const createAcceptedIssue = (data: typeof createInput) => {
         if (actor.actorType !== "user" || isOnboardingFirstTask || !data.assigneeAgentId || ["backlog", "done", "cancelled"].includes(data.status ?? "")) {
           return svc.create(companyId, data);
@@ -14753,6 +14776,30 @@ export function issueRoutes(
         }
       }
 
+      // inferdyne fork: pod mutex (services/pod-mutex-issue-guard.ts).
+      if (
+        typeof updateFields.status === "string" ||
+        updateFields.parentId !== undefined ||
+        Array.isArray(updateFields.labelIds)
+      ) {
+        const beforeLabelIds = await issueLabelIds(db, existing.id);
+        await enforcePodMutexOnIssueWrite(db, {
+          kind: req.actor.type === "board" ? "board" : req.actor.type === "agent" ? "agent" : "other",
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+        }, {
+          companyId: existing.companyId,
+          issueId: existing.id,
+          before: { status: existing.status, parentId: existing.parentId, labelIds: beforeLabelIds },
+          after: {
+            status: typeof updateFields.status === "string" ? updateFields.status : existing.status,
+            parentId: updateFields.parentId === undefined ? existing.parentId : (updateFields.parentId as string | null),
+            labelIds: Array.isArray(updateFields.labelIds) ? (updateFields.labelIds as string[]) : beforeLabelIds,
+          },
+        });
+      }
       const nextParentId =
         updateFields.parentId === undefined
           ? existing.parentId

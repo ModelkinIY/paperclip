@@ -22,7 +22,7 @@ import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { shouldHoldNewRunForWeeklyPace } from "../weekly-pace.js";
 import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
-import { podMutexService } from "../pod-mutex.js";
+import { podMutexService, type PodMutexPass } from "../pod-mutex.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -976,11 +976,58 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
+  // inferdyne fork: pod mutex (services/pod-mutex.ts). Every claim path goes
+  // through here, so the gate cannot be bypassed (executeRun, the per-agent
+  // queue loop, recovery). A run whose issue tree waits for a resource held by
+  // another tree stays queued (null, never skipped/cancelled) and records why
+  // on contextSnapshot.podMutex; other runs of the same agent go on. A lease
+  // this call took is dropped again when the claim does not go through.
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
     deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
+    podMutexPass?: PodMutexPass,
   ) {
+    if (run.status !== "queued") return run;
+    const mutexIssueId = run.startedAt
+      ? null
+      : run.issueId ?? run.nativeIssueId ?? readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+    if (!mutexIssueId) return claimQueuedRunUngated(run, companyAgents, deferredPostCommitEffects);
+    const podMutex = podMutexService(db);
+    const gate = await podMutex.tryAcquire(run.companyId, mutexIssueId, {
+      pass: podMutexPass,
+      actor: { actorType: "system", actorId: "pod_mutex", agentId: run.agentId, runId: run.id },
+    });
+    if (!gate.ok) {
+      logger.debug(
+        { runId: run.id, issueId: mutexIssueId, label: gate.labelName, holder: gate.holderIdentifier },
+        "pod mutex held by another tree; run stays queued",
+      );
+      await podMutex.recordRunWait(run.id, gate);
+      return null;
+    }
+    let claimed: Awaited<ReturnType<typeof claimQueuedRunUngated>> = null;
+    try {
+      claimed = await claimQueuedRunUngated(run, companyAgents, deferredPostCommitEffects);
+    } finally {
+      if (gate.acquiredLeaseId && claimed?.status !== "running") {
+        if (gate.mutex) podMutexPass?.gates.delete(`${gate.mutex.labelId}:${gate.mutex.rootIssueId}`);
+        await podMutex.releaseAcquired(run.companyId, gate, "claim_not_started").catch((err) => {
+          logger.warn({ err, runId: run.id }, "pod mutex: failed to drop the lease of a failed claim");
+        });
+      }
+    }
+    if (claimed && gate.mutex && parseObject(run.contextSnapshot).podMutex !== undefined) {
+      await podMutex.clearRunWait(run.id);
+    }
+    return claimed;
+  }
+
+  async function claimQueuedRunUngated(
+    run: typeof heartbeatRuns.$inferSelect,
+    companyAgents?: AgentOrgRow[],
+    deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
+  ): Promise<typeof heartbeatRuns.$inferSelect | null> {
     if (run.status !== "queued") return run;
     const [caseHandoffReceipt] = run.wakeupRequestId ? await db.select().from(caseHandoffs).where(and(
       eq(caseHandoffs.wakeupRequestId, run.wakeupRequestId), eq(caseHandoffs.companyId, run.companyId),
@@ -2188,29 +2235,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      // inferdyne fork: pod mutex (services/pod-mutex.ts). Gate per run: a run
-      // whose issue tree waits for a resource held by another tree stays
-      // queued (never skipped); other runs of the same agent go on.
-      const podMutex = podMutexService(db);
-      const podMutexActive = await podMutex.hasEnabled(agent.companyId);
+      // inferdyne fork: pod mutex gate lives in claimQueuedRun (per run); one
+      // pass shares the loaded configs and per-tree gate results.
+      const podMutexPass = await podMutexService(db).createPass(agent.companyId);
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
-        if (podMutexActive && !queuedRun.startedAt) {
-          const mutexIssueId = readNonEmptyString(parseObject(queuedRun.contextSnapshot).issueId);
-          if (mutexIssueId) {
-            const gate = await podMutex.tryAcquire(agent.companyId, mutexIssueId);
-            if (!gate.ok) {
-              logger.debug(
-                { runId: queuedRun.id, issueId: mutexIssueId, label: gate.labelName, holder: gate.holderIdentifier },
-                "pod mutex held by another tree; run stays queued",
-              );
-              continue;
-            }
-          }
-        }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
-          claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects);
+          claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects, podMutexPass);
         } catch (err) {
           if (isPermanentClaimRejection(err)) {
             rejectedClaims.push({ run: queuedRun, err });

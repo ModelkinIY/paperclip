@@ -1,7 +1,7 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
-import { ATTENTION_SOURCE_KINDS } from "@paperclipai/shared";
+import { ATTENTION_SOURCE_KINDS, podMutexUpsertSchema } from "@paperclipai/shared";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
 import {
   experimentalApiPaths,
@@ -1595,6 +1595,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/environments/{environmentId}/custom-image-setup-sessions",
   "POST /api/companies/{companyId}/goals",
   "POST /api/companies/{companyId}/labels",
+  "POST /api/companies/{companyId}/pod-mutexes",
   "POST /api/issues/{id}/documents/{key}/annotations",
   "POST /api/issues/{id}/documents/{key}/annotations/{threadId}/comments",
   "POST /api/routines/{id}/description/annotations",
@@ -4953,6 +4954,58 @@ registry.registerPath({
     body: jsonBody(createIssueLabelSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+// inferdyne fork: pod mutex (resource locks via labels), board only.
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/pod-mutexes",
+  tags: ["issues"],
+  summary: "List pod mutex labels with holder and waiting queue",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/pod-mutexes",
+  tags: ["issues"],
+  summary: "Configure a label as a pod mutex",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    body: jsonBody(podMutexUpsertSchema),
+  },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/pod-mutexes/{labelId}",
+  tags: ["issues"],
+  summary: "Update a pod mutex (holding statuses, enabled)",
+  request: {
+    params: z.object({ companyId: z.string(), labelId: z.string().uuid() }),
+    body: jsonBody(podMutexUpsertSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/companies/{companyId}/pod-mutexes/{labelId}",
+  tags: ["issues"],
+  summary: "Remove a pod mutex configuration (releases its lease)",
+  request: { params: z.object({ companyId: z.string(), labelId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/pod-mutexes/{labelId}/release",
+  tags: ["issues"],
+  summary: "Force-release a pod mutex lease",
+  request: { params: z.object({ companyId: z.string(), labelId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({

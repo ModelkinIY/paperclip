@@ -835,7 +835,10 @@ export async function createApp(
   api.use(sidebarPreferenceRoutes(db));
   api.use(announcementRoutes(db, { ...opts.announcements, version: opts.hostVersion ?? serverVersion }));
   api.use(deployDrainRoutes());
-  api.use(podMutexRoutes(db as any));
+  api.use(podMutexRoutes(db as any, {
+    wakeup: (agentId, wakeOpts) => connectionIntentHeartbeat.wakeup(agentId, wakeOpts as any),
+    resumeQueuedRuns: (scope) => connectionIntentHeartbeat.resumeQueuedRunsAfterDrain(scope),
+  }));
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));
   api.use(workspacePreferenceRoutes(db));

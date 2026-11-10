@@ -158,7 +158,8 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
-import { podMutexConflictMessage, podMutexService } from "./pod-mutex.js";
+import { podMutexConflictDetails, podMutexConflictMessage, podMutexService } from "./pod-mutex.js";
+import { attachPodMutexStates } from "./pod-mutex-issue-guard.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -12261,21 +12262,16 @@ export function issueService(db: Db) {
         await notifyRoutineExecutionStatus(tx, id);
         // inferdyne fork: pod mutex (services/pod-mutex.ts) — a tree waiting
         // for a resource held by another tree cannot check out.
-        const podMutexGate = await podMutexService(tx as unknown as Db).tryAcquire(
-          issueCompany.companyId,
-          id,
-        );
+        // The lease is taken inside this transaction; when the checkout
+        // itself does not match, the lease this call inserted is dropped.
+        const podMutexTx = podMutexService(tx as unknown as Db);
+        const podMutexGate = await podMutexTx.tryAcquire(issueCompany.companyId, id, {
+          actor: { actorType: "agent", actorId: agentId, agentId, runId: checkoutRunId },
+        });
         if (!podMutexGate.ok) {
-          throw conflict(podMutexConflictMessage(podMutexGate), {
-            issueId: id,
-            reason: "pod_mutex_held",
-            labelId: podMutexGate.mutex.labelId,
-            labelName: podMutexGate.labelName,
-            holderRootIssueId: podMutexGate.holderRootIssueId,
-            holderIdentifier: podMutexGate.holderIdentifier,
-          });
+          throw conflict(podMutexConflictMessage(podMutexGate), podMutexConflictDetails(podMutexGate, id));
         }
-        return tx
+        const checkedOut = await tx
           .update(issues)
           .set({
             assigneeAgentId: agentId,
@@ -12296,6 +12292,10 @@ export function issueService(db: Db) {
           )
           .returning()
           .then((rows) => rows[0] ?? null);
+        if (!checkedOut && podMutexGate.acquiredLeaseId) {
+          await podMutexTx.releaseAcquired(issueCompany.companyId, podMutexGate, "checkout_not_matched");
+        }
+        return checkedOut;
       });
 
       if (updated) {
@@ -14295,6 +14295,11 @@ export function issueService(db: Db) {
     ) => ReturnType<typeof service.update>;
   };
   const serviceApi = service as IssueServiceApi;
+
+  // inferdyne fork: pod mutex state on list rows (services/pod-mutex-issue-guard.ts).
+  const listWithoutPodMutex = service.list;
+  service.list = (async (companyId: string, filters?: IssueFilters) =>
+    attachPodMutexStates(db, companyId, await listWithoutPodMutex(companyId, filters))) as typeof service.list;
 
   // A company-scoped wrapper around `update`. It passes the company as a
   // guard on every read, lock, and write predicate, so a caller with only
