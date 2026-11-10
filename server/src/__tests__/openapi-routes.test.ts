@@ -57,6 +57,7 @@ const apiPrefixes: Record<string, string> = {
   "grok-bot.ts": "/api",
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",
+  "pod-mutex.ts": "/api",
   "decision-training.ts": "/api",
   "environments.ts": "/api",
   "execution-workspaces.ts": "/api",
