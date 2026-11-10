@@ -255,7 +255,7 @@ describeDb("pod mutex queue gate (startNextQueuedRunForAgent)", () => {
       return row!;
     }
 
-    it("a direct claim of another tree's run returns null, leaves it queued and never reaches the agent", async () => {
+    it("a direct claim of another tree's run returns null, leaves it queued and never starts", async () => {
       const s = await seed();
       const rootA = await s.issue({ status: "in_progress" });
       await s.tag(rootA.id);
@@ -263,14 +263,16 @@ describeDb("pod mutex queue gate (startNextQueuedRunForAgent)", () => {
       await s.tag(rootB.id);
       expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
       const runB = await s.queuedRun(rootB.id);
-      const { queue, deps } = queueWith(null);
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, s.agentId));
+      const { queue, deps } = queueWith(agentRow!);
       expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
-      expect(deps.getAgent).not.toHaveBeenCalled();
       expect(deps.cancelRunInternal).not.toHaveBeenCalled();
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
       expect(await runStatus(runB)).toMatchObject({ status: "queued", errorCode: null });
+      expect(readPodMutexRunWait((await loadRun(runB)).contextSnapshot)).toMatchObject({ holderRootIssueId: rootA.id });
     }, 60_000);
 
-    it("a claim that does not go through drops the lease it took (no leak)", async () => {
+    it("a deferred claim (agent awaiting setup) never takes the lease: no acquired/released churn over several passes", async () => {
       const s = await seed();
       const rootB = await s.issue();
       await s.tag(rootB.id);
@@ -278,12 +280,43 @@ describeDb("pod mutex queue gate (startNextQueuedRunForAgent)", () => {
       // agent awaiting setup: the claim keeps the run queued and returns null
       const [agentRow] = await db.select().from(agents).where(eq(agents.id, s.agentId));
       const { queue } = queueWith({ ...agentRow!, lifecycleState: "preparing", lifecycleHolds: [] });
-      expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
+      for (let i = 0; i < 3; i += 1) {
+        expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
+        await s.svc.sweep({}, { companyId: s.companyId });
+      }
       expect(await runStatus(runB)).toMatchObject({ status: "queued" });
       expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, s.companyId))).toHaveLength(0);
-      const released = await db.select().from(activityLog)
-        .where(and(eq(activityLog.companyId, s.companyId), eq(activityLog.action, "pod_mutex.released")));
-      expect(released[0]?.details).toMatchObject({ reason: "claim_not_started" });
+      const churn = await db.select().from(activityLog).where(and(
+        eq(activityLog.companyId, s.companyId),
+        sql`${activityLog.action} IN ('pod_mutex.acquired', 'pod_mutex.released')`,
+      ));
+      expect(churn).toHaveLength(0);
+    }, 60_000);
+
+    it("a dependency-blocked run is withheld before the gate: no lease, no activity rows", async () => {
+      const s = await seed();
+      const blocker = await s.issue();
+      const rootB = await s.issue();
+      await s.tag(rootB.id);
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, s.agentId));
+      const { queue, deps } = queueWith(agentRow!);
+      deps.issuesSvc.listDependencyReadiness.mockImplementation(async () => new Map([[rootB.id, {
+        issueId: rootB.id, blockerIssueIds: [blocker.id], unresolvedBlockerIssueIds: [blocker.id],
+        unresolvedBlockerCount: 1, allBlockersDone: false, isDependencyReady: false,
+      }]]) as any);
+      // each pass: a fresh queued run for the blocked issue is withheld (cancelled) at the claim
+      for (let i = 0; i < 3; i += 1) {
+        const runB = await s.queuedRun(rootB.id);
+        expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
+        expect((await runStatus(runB))?.status).not.toBe("running");
+        await s.svc.sweep({}, { companyId: s.companyId });
+      }
+      expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, s.companyId))).toHaveLength(0);
+      const churn = await db.select().from(activityLog).where(and(
+        eq(activityLog.companyId, s.companyId),
+        sql`${activityLog.action} IN ('pod_mutex.acquired', 'pod_mutex.released')`,
+      ));
+      expect(churn).toHaveLength(0);
     }, 60_000);
   });
 });
