@@ -20,6 +20,7 @@ import {
   type RecoveryLivenessContext,
 } from "../lib/recovery-lineage";
 import { StatusIcon, getStatusIconLabel } from "./StatusIcon";
+import { PodMutexBadge } from "./PodMutexBadge";
 import { hasAssignedBacklogBlocker } from "../lib/issue-blockers";
 import { ExternalObjectStatusSummary } from "./ExternalObjectStatusSummary";
 import { Badge } from "@/components/ui/badge";
@@ -395,6 +396,7 @@ export function IssueRow({
                   ) : null}
                 </span>
               ) : recoveryIndicator}
+              <PodMutexBadge state={issue.podMutex} className="relative z-10" />
               {mobileTitleMeta ? (
                 <span className="ml-auto shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground sm:hidden">
                   {mobileTitleMeta}

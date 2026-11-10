@@ -1,6 +1,6 @@
 import { useSelectedHeartbeatRun } from "../hooks/useSelectedHeartbeatRun";
 import { AgentCharacter } from "../components/AgentCharacter";
-import { characterStateForAgent } from "@paperclipai/shared";
+import { characterStateForAgent, podMutexWaitLabel, readPodMutexRunWait } from "@paperclipai/shared";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, useLocation, Link, Navigate, useBeforeUnload, type NavigateFunction } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
@@ -1115,6 +1115,13 @@ function SummaryRow({ label, children }: { label: string; children: React.ReactN
   );
 }
 
+/** inferdyne fork: "queued — waiting for pod:X held by INF-123" for a run deferred by a pod mutex. */
+export function runPodMutexWaitText(run: Pick<HeartbeatRun, "status" | "contextSnapshot">): string | null {
+  if (run.status !== "queued") return null;
+  const wait = readPodMutexRunWait(run.contextSnapshot);
+  return wait ? `queued — ${podMutexWaitLabel(wait)}` : null;
+}
+
 export type LatestRunIssue = { id: string; title: string; status: string; identifier?: string | null };
 
 /**
@@ -1259,6 +1266,9 @@ function LatestRunCard({
         <div className="flex items-center gap-2">
           <StatusIcon className={cn("h-3.5 w-3.5", statusInfo.color, run.status === "running" && "animate-spin")} />
           <StatusBadge status={run.status} />
+          {runPodMutexWaitText(run) ? (
+            <span className="truncate text-xs text-amber-700 dark:text-amber-300" data-slot="run-pod-mutex-wait">{runPodMutexWaitText(run)}</span>
+          ) : null}
           {task ? (
             <>
               <StatusGlyph status={task.status} size="sm" />
@@ -2666,6 +2676,11 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
           {relativeTime(run.createdAt)}
         </span>
       </div>
+      {runPodMutexWaitText(run) ? (
+        <span className="text-xs text-amber-700 dark:text-amber-300 truncate pl-5.5" data-slot="run-pod-mutex-wait">
+          {runPodMutexWaitText(run)}
+        </span>
+      ) : null}
       {summary && (
         <span className="text-xs text-muted-foreground truncate pl-5.5">
           {summary.slice(0, 60)}

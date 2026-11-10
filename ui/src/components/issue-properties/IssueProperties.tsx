@@ -26,6 +26,8 @@ import { authApi } from "../../api/auth";
 import { executionWorkspacesApi } from "../../api/execution-workspaces";
 import { instanceSettingsApi } from "../../api/instanceSettings";
 import { issuesApi } from "../../api/issues";
+import { podMutexApi } from "../../api/podMutex";
+import { PodMutexBadge } from "../PodMutexBadge";
 import { useIssuePlanDocument } from "@/hooks/useIssuePlanDocument";
 import { useIssueDocuments } from "@/hooks/useIssueDocuments";
 import { useStreamlinedUiEnabled } from "@/hooks/useStreamlinedUiEnabled";
@@ -88,7 +90,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { IssuePropertiesPlansTab } from "./IssuePropertiesPlansTab";
 import { IssuePropertiesArtifactsTab } from "./IssuePropertiesArtifactsTab";
-import { User, ArrowUpRight, Plus, X, GitBranch, FolderOpen, HardDrive, Check, Clock, RotateCcw, Loader2, CheckCircle2, ArchiveRestore, ChevronLeft } from "lucide-react";
+import { Lock, User, ArrowUpRight, Plus, X, GitBranch, FolderOpen, HardDrive, Check, Clock, RotateCcw, Loader2, CheckCircle2, ArchiveRestore, ChevronLeft } from "lucide-react";
 import { InlineEntitySelector, type InlineEntityOption } from "../InlineEntitySelector";
 import {
   AssigneeRunningBanner,
@@ -451,6 +453,23 @@ export function IssueProperties({
     queryKey: queryKeys.issues.labels(companyId!),
     queryFn: () => issuesApi.listLabels(companyId!),
     enabled: !!companyId,
+  });
+
+  // inferdyne fork: mark pod mutex labels in the picker. Board-only endpoint;
+  // a 403 (agent session) or any failure just means no marks.
+  const { data: podMutexLabelIds } = useQuery({
+    queryKey: ["pod-mutexes", companyId, "label-ids"],
+    queryFn: async () => {
+      try {
+        const entries = await podMutexApi.list(companyId!);
+        return new Set(entries.filter((e) => e.enabled).map((e) => e.labelId));
+      } catch {
+        return new Set<string>();
+      }
+    },
+    enabled: !!companyId,
+    retry: false,
+    staleTime: 60_000,
   });
 
   const { data: allIssues, isFetching: isFetchingIssuePickerIssues } = useQuery({
@@ -1639,7 +1658,7 @@ export function IssueProperties({
       .filter((label): label is IssueLabel => Boolean(label));
   }, [issue.labelIds, issue.labels, labels]);
 
-  const labelsTrigger = selectedIssueLabels.length > 0 ? (
+  const labelsTriggerBase = selectedIssueLabels.length > 0 ? (
     <div className="flex min-w-0 flex-col items-start gap-1">
       {selectedIssueLabels.slice(0, 3).map((label) => (
         <PropertyChip
@@ -1662,6 +1681,14 @@ export function IssueProperties({
   ) : (
     <span className="text-sm text-muted-foreground">None</span>
   );
+  // inferdyne fork: the pod mutex can be inherited from an ancestor, so show it
+  // even when this issue carries no label itself.
+  const labelsTrigger = issue.podMutex ? (
+    <div className="flex min-w-0 flex-col items-start gap-1">
+      <PodMutexBadge state={issue.podMutex} showFree />
+      {labelsTriggerBase}
+    </div>
+  ) : labelsTriggerBase;
   const labelsContent = (
     <>
       <input
@@ -1690,6 +1717,9 @@ export function IssueProperties({
               >
                 <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: label.color }} />
                 <span className="truncate flex-1">{label.name}</span>
+                {podMutexLabelIds?.has(label.id) ? (
+                  <Lock className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Resource mutex label" data-slot="pod-mutex-label-icon" />
+                ) : null}
                 {selected && <Check className="h-3.5 w-3.5 shrink-0 text-foreground" aria-hidden="true" />}
               </button>
             );

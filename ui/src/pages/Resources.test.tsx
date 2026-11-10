@@ -24,6 +24,10 @@ vi.mock("@/lib/router", () => ({
 vi.mock("../context/CompanyContext", () => ({
   useCompany: () => ({ selectedCompanyId: "company-1" }),
 }));
+const mockPushToast = vi.hoisted(() => vi.fn());
+vi.mock("../context/ToastContext", () => ({
+  useOptionalToastActions: () => ({ pushToast: mockPushToast }),
+}));
 vi.mock("../context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }),
 }));
@@ -57,6 +61,8 @@ const HELD: PodMutexEntry = {
     acquiredAt: "2026-11-10T10:00:00Z",
     acquiredByIssueId: "issue-a",
     stillHolding: true,
+    hasRunningRun: true,
+    lastRunActivityAt: null,
   },
   waiting: [
     { issueId: "issue-b", identifier: "INF-2", title: "B", priority: "high", status: "todo", hasQueuedRun: true },
@@ -194,6 +200,56 @@ describe("Resources page", () => {
     act(() => button("Add mutex label").click());
     await flush();
     expect(mockPodMutexApi.create).toHaveBeenLastCalledWith("company-1", { labelName: "pod:brand-new" });
+  });
+
+  it("the last holding-status chip is disabled with a hint and cannot be unticked", async () => {
+    await render([{ ...HELD, holdingStatuses: ["in_progress"] }]);
+    const chip = button("in_progress");
+    expect(chip.disabled).toBe(true);
+    expect(container.textContent).toContain("At least one holding status is required");
+    act(() => chip.click());
+    await flush();
+    expect(mockPodMutexApi.update).not.toHaveBeenCalled();
+    expect(button("todo").disabled).toBe(false);
+  });
+
+  it("shows how long the holder has held the resource", async () => {
+    const acquiredAt = new Date(Date.now() - (2 * 60 + 5) * 60_000).toISOString();
+    await render([{ ...HELD, holder: { ...HELD.holder!, acquiredAt } }]);
+    expect(container.textContent).toContain("for 2h 5m");
+  });
+
+  it("warns when the holder tree has had no running run for over 30 minutes", async () => {
+    const old = new Date(Date.now() - 45 * 60_000).toISOString();
+    await render([{ ...HELD, holder: { ...HELD.holder!, acquiredAt: old, hasRunningRun: false, lastRunActivityAt: old } }]);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("no running run for over 30 min");
+  });
+
+  it("no stale warning while a run is going or activity is recent", async () => {
+    const old = new Date(Date.now() - 45 * 60_000).toISOString();
+    const recent = new Date(Date.now() - 5 * 60_000).toISOString();
+    await render([
+      { ...HELD, holder: { ...HELD.holder!, acquiredAt: old, hasRunningRun: true, lastRunActivityAt: old } },
+      { ...HELD, id: "cfg-2", labelId: "label-2", holder: { ...HELD.holder!, acquiredAt: old, hasRunningRun: false, lastRunActivityAt: recent } },
+    ]);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("force-release warns via toast when the former holder still has a running run", async () => {
+    mockPodMutexApi.release.mockResolvedValue({ ok: true, released: true, held: true, holderRootIssueId: "issue-a", holderHasRunningRun: true });
+    await render([HELD]);
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    act(() => button("Release").click());
+    await flush();
+    expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ tone: "warn" }));
+  });
+
+  it("mutation errors surface as an error toast", async () => {
+    mockPodMutexApi.update.mockRejectedValue(new Error("holdingStatuses: too small"));
+    await render([HELD]);
+    act(() => button("blocked").click());
+    await flush();
+    expect(mockPushToast).toHaveBeenCalledWith(expect.objectContaining({ tone: "error", body: "holdingStatuses: too small" }));
   });
 
   it("shows API errors", async () => {

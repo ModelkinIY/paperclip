@@ -29,6 +29,12 @@ interface StatusIconProps {
 function blockedAttentionLabel(blockerAttention: IssueBlockerAttention | null | undefined) {
   if (!blockerAttention || blockerAttention.state === "none") return "Blocked";
 
+  if (blockerAttention.reason === "waiting_on_resource") {
+    const r = blockerAttention.resource;
+    if (!r) return "Waiting · shared resource held by another task";
+    return `Waiting · ${r.labelName} held by ${r.holderIdentifier ?? "another task"}`;
+  }
+
   if (blockerAttention.reason === "active_child") {
     const count = blockerAttention.coveredBlockerCount;
     if (count === 1 && blockerAttention.sampleBlockerIdentifier) {
