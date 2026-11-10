@@ -38,21 +38,35 @@ export async function issueLabelIds(db: Db, issueId: string): Promise<string[]> 
   }
 }
 
-export async function enforcePodMutexOnIssueWrite(
+type PodMutexIssueWriteRequest = {
+  companyId: string;
+  issueId: string | null;
+  before: { status: string; parentId: string | null; labelIds: string[] } | null;
+  after: { status: string; parentId: string | null; labelIds: string[] };
+} | {
+  companyId: string;
+  issueId: string | null;
+  /** Called only when a mutex label is configured (keeps unconfigured companies to one config lookup). */
+  load: () => Promise<Omit<PodMutexIssueWriteInput, "issueId">>;
+};
+
+export interface PodMutexWriteOutcome {
+  companyId: string;
+  issueId: string | null;
+  action: "pod_mutex.conflict_override" | "pod_mutex.conflict_warning";
+  details: ReturnType<typeof podMutexConflictDetails> & { cause: "status" | "tree" };
+}
+
+/**
+ * The check alone: throws 409 for an enforced conflict, returns what must be
+ * logged otherwise (board override / tree warning), logs nothing. Callers log
+ * with logPodMutexWriteOutcome once the write has gone through.
+ */
+export async function checkPodMutexOnIssueWrite(
   db: Db,
   actor: PodMutexWriteActor,
-  input: {
-    companyId: string;
-    issueId: string | null;
-    before: { status: string; parentId: string | null; labelIds: string[] } | null;
-    after: { status: string; parentId: string | null; labelIds: string[] };
-  } | {
-    companyId: string;
-    issueId: string | null;
-    /** Called only when a mutex label is configured (keeps unconfigured companies to one config lookup). */
-    load: () => Promise<Omit<PodMutexIssueWriteInput, "issueId">>;
-  },
-) {
+  input: PodMutexIssueWriteRequest,
+): Promise<PodMutexWriteOutcome | null> {
   let result: Awaited<ReturnType<ReturnType<typeof podMutexService>["checkIssueWrite"]>>;
   try {
     result = await podMutexService(db).checkIssueWrite(
@@ -69,19 +83,39 @@ export async function enforcePodMutexOnIssueWrite(
   if (result.cause === "status" && actor.kind !== "board") {
     throw conflict(podMutexConflictMessage(result.gate), details);
   }
-  await logActivity(db, {
+  return {
     companyId: input.companyId,
+    issueId: input.issueId,
+    action: result.cause === "status" ? "pod_mutex.conflict_override" : "pod_mutex.conflict_warning",
+    details,
+  };
+}
+
+export async function logPodMutexWriteOutcome(db: Db, actor: PodMutexWriteActor, outcome: PodMutexWriteOutcome) {
+  await logActivity(db, {
+    companyId: outcome.companyId,
     actorType: actor.actorType,
     actorId: actor.actorId,
     agentId: actor.agentId ?? null,
     runId: actor.runId ?? null,
-    action: result.cause === "status" ? "pod_mutex.conflict_override" : "pod_mutex.conflict_warning",
-    entityType: input.issueId ? "issue" : "label",
-    entityId: input.issueId ?? result.gate.mutex.labelId,
-    issueId: input.issueId,
-    details,
+    action: outcome.action,
+    entityType: outcome.issueId ? "issue" : "label",
+    entityId: outcome.issueId ?? outcome.details.labelId,
+    issueId: outcome.issueId,
+    details: { ...outcome.details },
   });
-  return details;
+}
+
+/** Check + log in one step (issue update). */
+export async function enforcePodMutexOnIssueWrite(
+  db: Db,
+  actor: PodMutexWriteActor,
+  input: PodMutexIssueWriteRequest,
+) {
+  const outcome = await checkPodMutexOnIssueWrite(db, actor, input);
+  if (!outcome) return null;
+  await logPodMutexWriteOutcome(db, actor, outcome);
+  return outcome.details;
 }
 
 /**

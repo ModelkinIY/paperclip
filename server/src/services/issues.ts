@@ -2081,6 +2081,8 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   allowDuplicate?: boolean;
   assertCanReuseIssue?: (issue: typeof issues.$inferSelect) => Promise<void>;
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
+  /** inferdyne fork: runs once a new row will be inserted (after idempotency/dedupe resolution). */
+  beforeCreateInsert?: () => Promise<void>;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -10197,6 +10199,7 @@ export function issueService(db: Db) {
         allowDuplicate,
         assertCanReuseIssue,
         onDeduplicated,
+        beforeCreateInsert,
         ...issueData
       } = data;
       const explicitTitle = issueData.title?.trim();
@@ -10352,6 +10355,7 @@ export function issueService(db: Db) {
           );
           return withRelations;
         }
+        await beforeCreateInsert?.();
 
         if (issueData.status === "done" && requiredQualityReview(issueData.executionPolicy)) {
           throw unprocessable("A new task with required quality review cannot start completed", { code: "required_quality_review_incomplete" });

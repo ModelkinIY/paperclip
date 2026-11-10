@@ -161,6 +161,10 @@ const mockExternalObjectService = vi.hoisted(() => ({
 }));
 const mockIssueTreeControlService = vi.hoisted(() => ({ getActivePauseHoldGate: vi.fn(async () => null) }));
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockPodMutexGuard = vi.hoisted(() => ({
+  checkPodMutexOnIssueWrite: vi.fn(async (..._args: unknown[]): Promise<unknown> => null),
+  logPodMutexWriteOutcome: vi.fn(async (..._args: unknown[]) => undefined),
+}));
 const mockObserveCrossIssueInfluence = vi.hoisted(() => vi.fn(async () => null));
 
 const mockRetryWorkspaceExport = vi.hoisted(() => vi.fn());
@@ -221,6 +225,18 @@ function registerRouteMocks() {
 
   vi.doMock("../services/external-objects.js", () => ({
     externalObjectService: () => mockExternalObjectService,
+  }));
+
+  vi.doMock("../services/pod-mutex-issue-guard.js", () => ({
+    attachPodMutexStates: async (_db: unknown, _companyId: string, rows: unknown[]) => rows,
+    issueLabelIds: async () => [],
+    checkPodMutexOnIssueWrite: mockPodMutexGuard.checkPodMutexOnIssueWrite,
+    logPodMutexWriteOutcome: mockPodMutexGuard.logPodMutexWriteOutcome,
+    enforcePodMutexOnIssueWrite: async (db: unknown, actor: unknown, input: unknown) => {
+      const outcome = await mockPodMutexGuard.checkPodMutexOnIssueWrite(db, actor, input);
+      if (outcome) await mockPodMutexGuard.logPodMutexWriteOutcome(db, actor, outcome);
+      return outcome;
+    },
   }));
 
   vi.doMock("../services/activity-log.js", () => ({
@@ -703,6 +719,8 @@ describe("agent issue mutation checkout ownership", () => {
     });
     mockIssueService.list.mockResolvedValue([makeIssue()]);
     mockIssueService.assertCheckoutOwner.mockResolvedValue({ adoptedFromRunId: null });
+    mockPodMutexGuard.checkPodMutexOnIssueWrite.mockReset().mockResolvedValue(null);
+    mockPodMutexGuard.logPodMutexWriteOutcome.mockReset();
     mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, unknown>) => ({
       ...makeIssue({
         id: "88888888-8888-4888-8888-888888888888",
@@ -1444,6 +1462,61 @@ describe("agent issue mutation checkout ownership", () => {
         inheritExecutionWorkspaceFromIssueId: issueId,
       }),
     );
+  });
+
+  describe("pod mutex on issue create", () => {
+    const outcome = {
+      companyId, issueId: null, action: "pod_mutex.conflict_override",
+      details: { reason: "pod_mutex_held", cause: "status" },
+    };
+
+    it("checks with the generated issue id once a row will be inserted and logs the board override after the create", async () => {
+      mockPodMutexGuard.checkPodMutexOnIssueWrite.mockResolvedValue(outcome);
+      mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, any>) => {
+        await input.beforeCreateInsert?.();
+        expect(mockPodMutexGuard.logPodMutexWriteOutcome).not.toHaveBeenCalled();
+        return { ...makeIssue({ id: input.id, status: "todo", assigneeAgentId: null }), companyId };
+      });
+      const res = await request(await createApp(boardActor())).post(`/api/companies/${companyId}/issues`)
+        .send({ title: "GPU job", status: "todo" });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      const createdId = mockIssueService.create.mock.calls[0]![1].id;
+      expect(mockPodMutexGuard.checkPodMutexOnIssueWrite).toHaveBeenCalledWith(
+        expect.anything(), expect.objectContaining({ kind: "board" }),
+        expect.objectContaining({ companyId, issueId: createdId, before: null }),
+      );
+      expect(mockPodMutexGuard.logPodMutexWriteOutcome).toHaveBeenCalledTimes(1);
+      expect(mockPodMutexGuard.logPodMutexWriteOutcome.mock.invocationCallOrder[0])
+        .toBeGreaterThan(mockIssueService.create.mock.invocationCallOrder[0]!);
+    });
+
+    it("an idempotent retry returns the existing issue without the check (no 409, no override log)", async () => {
+      mockPodMutexGuard.checkPodMutexOnIssueWrite.mockImplementation(async () => {
+        throw new HttpError(409, "held", { reason: "pod_mutex_held" });
+      });
+      mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, any>) => {
+        input.onDeduplicated?.("idempotency_key");
+        return { ...makeIssue({ id: "88888888-8888-4888-8888-888888888888", status: "todo", assigneeAgentId: null }), companyId };
+      });
+      const res = await request(await createApp(ownerActor())).post(`/api/companies/${companyId}/issues`)
+        .send({ title: "GPU job", status: "todo", idempotencyKey: "k-1" });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({ id: "88888888-8888-4888-8888-888888888888", deduplicated: true });
+      expect(mockPodMutexGuard.checkPodMutexOnIssueWrite).not.toHaveBeenCalled();
+      expect(mockPodMutexGuard.logPodMutexWriteOutcome).not.toHaveBeenCalled();
+    });
+
+    it("a failed create logs no override", async () => {
+      mockPodMutexGuard.checkPodMutexOnIssueWrite.mockResolvedValue(outcome);
+      mockIssueService.create.mockImplementation(async (_companyId: string, input: Record<string, any>) => {
+        await input.beforeCreateInsert?.();
+        throw new HttpError(422, "nope");
+      });
+      const res = await request(await createApp(boardActor())).post(`/api/companies/${companyId}/issues`)
+        .send({ title: "GPU job", status: "todo" });
+      expect(res.status).toBe(422);
+      expect(mockPodMutexGuard.logPodMutexWriteOutcome).not.toHaveBeenCalled();
+    });
   });
 
   it("authorizes child creation through the shared visible-issue write path", async () => {
@@ -3010,6 +3083,29 @@ describe("agent issue mutation checkout ownership", () => {
         expect(mockIssueService.update).not.toHaveBeenCalled();
       },
     );
+
+    it("a pod mutex 409 on the update leaves the running run and the runner goal untouched", async () => {
+      mockPodMutexGuard.checkPodMutexOnIssueWrite.mockImplementation(async () => {
+        throw new HttpError(409, "Resource \"pod:igor-3090\" is held by PAP-9", { reason: "pod_mutex_held" });
+      });
+      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+        .patch(`/api/issues/${issueId}`).send({ assigneeAgentId: peerAgentId, assigneeUserId: null, status: "todo" });
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.details).toMatchObject({ reason: "pod_mutex_held" });
+      expect(mockPodMutexGuard.checkPodMutexOnIssueWrite).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+      expect(mockRunnerGoalService.act).not.toHaveBeenCalled();
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("the pod mutex check runs before the outgoing run is stopped", async () => {
+      const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
+        .patch(`/api/issues/${issueId}`).send({ assigneeAgentId: peerAgentId, assigneeUserId: null, status: "todo" });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockHeartbeatService.cancelRun).toHaveBeenCalledTimes(1);
+      expect(mockPodMutexGuard.checkPodMutexOnIssueWrite.mock.invocationCallOrder[0])
+        .toBeLessThan(mockHeartbeatService.cancelRun.mock.invocationCallOrder[0]!);
+    });
 
     it.each(["agent", "unassigned"])("still stops the outgoing run before an %s handoff", async target => {
       const res = await request(handoffApp({ ...ownerActor(), source: "agent_jwt" }))
