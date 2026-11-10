@@ -29,7 +29,7 @@
  *   status return 409.
  * - No enabled mutex labels for a company → every function is a no-op.
  */
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { issues, labels, podMutexLabels, podMutexLeases, type Db } from "@paperclipai/db";
 import {
   ISSUE_STATUSES,
@@ -109,6 +109,24 @@ export interface PodMutexActivityActor {
   runId?: string | null;
 }
 
+/**
+ * Labels released outside the sweep's own lease drop (force-release, delete,
+ * disable, a failed claim, a stale lease at a gate) since the last sweep. The
+ * sweep wakes a todo waiter (no queued run) only right after a release, so it
+ * consumes these marks once instead of waking every tick. In-process: one
+ * server owns the sweep timer.
+ */
+const releasedSinceSweep = new Set<string>();
+function releaseKey(companyId: string, labelId: string) {
+  return `${companyId}:${labelId}`;
+}
+function markReleased(companyId: string, labelId: string) {
+  releasedSinceSweep.add(releaseKey(companyId, labelId));
+}
+function takeReleaseMark(companyId: string, labelId: string) {
+  return releasedSinceSweep.delete(releaseKey(companyId, labelId));
+}
+
 const SYSTEM_ACTOR: PodMutexActivityActor = { actorType: "system", actorId: "pod_mutex" };
 const PRIORITY_RANK: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
@@ -123,7 +141,8 @@ export function pickEffectiveMutex(
 ): EffectiveMutex | null {
   const enabled = rows
     .filter((row) => configs.get(row.labelId)?.enabled)
-    .sort((a, b) => a.depth - b.depth || a.labelId.localeCompare(b.labelId));
+    // tie on one issue: byte order of the label id (SQL: COLLATE "C", see keepsTree)
+    .sort((a, b) => a.depth - b.depth || (a.labelId < b.labelId ? -1 : a.labelId > b.labelId ? 1 : 0));
   const first = enabled[0];
   if (!first) return null;
   const labelId = first.labelId;
@@ -173,8 +192,37 @@ function resultRows<T>(rows: unknown): T[] {
   return Array.from(rows as Iterable<T>);
 }
 
-function textList(values: string[]) {
-  return sql.join(values.map((s) => sql`${s}`), sql`, `);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** One uuid[] parameter (index-friendly `= ANY(...)`); non-UUID input is dropped, never cast. */
+function uuidArray(values: string[]) {
+  const ids = [...new Set(values.filter((v) => UUID_RE.test(v)))];
+  return sql`${`{${ids.join(",")}}`}::uuid[]`;
+}
+
+/**
+ * THE tree membership rule (shared by treeHolds, listWaiters, holderRunInfo):
+ * walking down a tree of label L, a child stays in it unless its own enabled
+ * mutex labels make it pick another label -- exactly pickEffectiveMutex: the
+ * issue carries an enabled label other than L and either lacks L or that
+ * label sorts before L (byte order). Such a child starts its own tree and the
+ * walk stops there (R(L) -> X(M) -> C(L) -> G: X, C, G are not in R's tree).
+ */
+function keepsTree(companyId: string, issueExpr: SQL, labelExpr: SQL) {
+  return sql`(${labelExpr} IS NULL OR NOT EXISTS (
+    SELECT 1 FROM issue_labels ol
+    JOIN pod_mutex_labels pml ON pml.label_id = ol.label_id AND pml.company_id = ${companyId} AND pml.enabled
+    WHERE ol.issue_id = ${issueExpr} AND ol.label_id <> ${labelExpr}
+      AND (ol.label_id::text COLLATE "C" < (${labelExpr})::text COLLATE "C"
+        OR NOT EXISTS (SELECT 1 FROM issue_labels sl WHERE sl.issue_id = ${issueExpr} AND sl.label_id = ${labelExpr}))
+  ))`;
+}
+
+export interface TreeHoldsQuery {
+  rootIssueId: string;
+  holdingStatuses: string[];
+  /** With a label the root must still carry it and the walk stops at other trees. */
+  labelId?: string | null;
 }
 
 export function podMutexConflictDetails(gate: PodMutexBlocked, issueId: string | null): PodMutexConflictDetails {
@@ -235,7 +283,7 @@ export function podMutexService(db: Db | Executor) {
         WITH RECURSIVE chain(origin, issue_id, parent_id, depth, visited) AS (
           SELECT i.id, i.id, i.parent_id, 0, ARRAY[i.id]
           FROM issues i
-          WHERE i.company_id = ${companyId} AND i.id::text IN (${textList(issueIds)})
+          WHERE i.company_id = ${companyId} AND i.id = ANY(${uuidArray(issueIds)})
           UNION ALL
           SELECT chain.origin, p.id, p.parent_id, chain.depth + 1, chain.visited || p.id
           FROM chain
@@ -248,7 +296,7 @@ export function podMutexService(db: Db | Executor) {
           chain.depth::int AS "depth", il.label_id::text AS "labelId"
         FROM chain
         JOIN issue_labels il ON il.issue_id = chain.issue_id
-        WHERE il.label_id::text IN (${textList(labelIds)})
+        WHERE il.label_id = ANY(${uuidArray(labelIds)})
       `),
     );
     for (const r of rows) {
@@ -301,9 +349,50 @@ export function podMutexService(db: Db | Executor) {
   }
 
   /**
-   * Does the tree rooted at rootIssueId hold the mutex? With labelId the root
-   * must still carry that label (removing it from the root = release).
+   * Does each tree hold its mutex? One query for many roots. A tree = the root
+   * plus descendants by the shared membership rule (keepsTree); it holds while
+   * the root is visible, not cancelled, still carries the label, and any member
+   * is in a holding status.
    */
+  async function treeHoldsMany(companyId: string, queries: TreeHoldsQuery[], exec: Db = x): Promise<boolean[]> {
+    const live = queries
+      .map((q, k) => ({ k, root: q.rootIssueId, label: q.labelId ?? null, statuses: q.holdingStatuses }))
+      .filter((q) => q.statuses.length > 0 && UUID_RE.test(q.root));
+    const out = queries.map(() => false);
+    if (live.length === 0) return out;
+    const rows = resultRows<{ k: number; holds: boolean }>(
+      await exec.execute(sql`
+        WITH RECURSIVE e AS (
+          SELECT * FROM jsonb_to_recordset(${JSON.stringify(live)}::jsonb)
+            AS e(k int, root uuid, label uuid, statuses text[])
+        ),
+        tree(k, label, issue_id, depth, visited) AS (
+          SELECT e.k, e.label, i.id, 0, ARRAY[i.id]
+          FROM e JOIN issues i ON i.id = e.root
+          WHERE i.company_id = ${companyId}
+            AND i.hidden_at IS NULL AND i.status <> 'cancelled'
+            AND (e.label IS NULL OR EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label_id = e.label))
+          UNION ALL
+          SELECT tree.k, tree.label, c.id, tree.depth + 1, tree.visited || c.id
+          FROM tree
+          JOIN issues c ON c.parent_id = tree.issue_id
+          WHERE c.company_id = ${companyId}
+            AND c.hidden_at IS NULL
+            AND tree.depth < ${POD_MUTEX_MAX_DEPTH}
+            AND NOT c.id = ANY(tree.visited)
+            AND ${keepsTree(companyId, sql`c.id`, sql`tree.label`)}
+        )
+        SELECT e.k::int AS "k", EXISTS (
+          SELECT 1 FROM tree JOIN issues i ON i.id = tree.issue_id
+          WHERE tree.k = e.k AND i.status = ANY(e.statuses)
+        ) AS "holds"
+        FROM e
+      `),
+    );
+    for (const r of rows) out[Number(r.k)] = r.holds === true;
+    return out;
+  }
+
   async function treeHolds(
     companyId: string,
     rootIssueId: string,
@@ -311,31 +400,7 @@ export function podMutexService(db: Db | Executor) {
     labelId?: string,
     exec: Db = x,
   ) {
-    if (holdingStatuses.length === 0) return false;
-    const rows = resultRows<{ holds: boolean }>(
-      await exec.execute(sql`
-        WITH RECURSIVE tree(issue_id, depth, visited) AS (
-          SELECT i.id, 0, ARRAY[i.id]
-          FROM issues i
-          WHERE i.id = ${rootIssueId} AND i.company_id = ${companyId}
-            AND i.hidden_at IS NULL AND i.status <> 'cancelled'
-            ${labelId ? sql`AND EXISTS (SELECT 1 FROM issue_labels il WHERE il.issue_id = i.id AND il.label_id = ${labelId})` : sql``}
-          UNION ALL
-          SELECT c.id, tree.depth + 1, tree.visited || c.id
-          FROM tree
-          JOIN issues c ON c.parent_id = tree.issue_id
-          WHERE c.company_id = ${companyId}
-            AND c.hidden_at IS NULL
-            AND tree.depth < ${POD_MUTEX_MAX_DEPTH}
-            AND NOT c.id = ANY(tree.visited)
-        )
-        SELECT EXISTS (
-          SELECT 1 FROM tree JOIN issues i ON i.id = tree.issue_id
-          WHERE i.status IN (${textList(holdingStatuses)})
-        ) AS holds
-      `),
-    );
-    return rows[0]?.holds === true;
+    return (await treeHoldsMany(companyId, [{ rootIssueId, holdingStatuses, labelId }], exec))[0] === true;
   }
 
   async function getLease(companyId: string, labelId: string, exec: Db = x) {
@@ -372,7 +437,7 @@ export function podMutexService(db: Db | Executor) {
   async function logLease(
     exec: Db,
     companyId: string,
-    action: "pod_mutex.acquired" | "pod_mutex.released",
+    action: "pod_mutex.acquired" | "pod_mutex.released" | "pod_mutex.holder_moved",
     labelId: string,
     details: Record<string, unknown>,
     actor: PodMutexActivityActor = SYSTEM_ACTOR,
@@ -388,6 +453,45 @@ export function podMutexService(db: Db | Executor) {
       entityId: labelId,
       details,
     });
+  }
+
+  /**
+   * The lease names the root of its tree at acquire time. When the tree's
+   * effective root changed since (the label was put on an ancestor, the holder
+   * root was re-parented under a same-label tree), the holder root now
+   * resolves into `mutex`'s tree: same tree, not another holder.
+   */
+  async function holderInTree(
+    companyId: string,
+    holderRootIssueId: string,
+    mutex: { labelId: string; rootIssueId: string },
+    configs: Map<string, PodMutexConfigRow>,
+    exec: Db = x,
+  ) {
+    if (holderRootIssueId === mutex.rootIssueId) return true;
+    const holder = (await resolveMany(companyId, [holderRootIssueId], configs, exec)).get(holderRootIssueId);
+    return holder?.labelId === mutex.labelId && holder.rootIssueId === mutex.rootIssueId;
+  }
+
+  /** Point the lease at the tree's current root (inside the label lock). */
+  async function moveLeaseHolder(
+    exec: Db,
+    companyId: string,
+    lease: { id: string; holderRootIssueId: string; labelId: string },
+    newRootIssueId: string,
+    actor?: PodMutexActivityActor,
+  ) {
+    const moved = await exec
+      .update(podMutexLeases)
+      .set({ holderRootIssueId: newRootIssueId })
+      .where(and(eq(podMutexLeases.id, lease.id), eq(podMutexLeases.holderRootIssueId, lease.holderRootIssueId)))
+      .returning({ id: podMutexLeases.id });
+    if (moved.length === 0) return false;
+    logger.info({ companyId, labelId: lease.labelId, from: lease.holderRootIssueId, to: newRootIssueId }, "pod mutex: lease holder root moved");
+    await logLease(exec, companyId, "pod_mutex.holder_moved", lease.labelId, {
+      fromHolderRootIssueId: lease.holderRootIssueId, holderRootIssueId: newRootIssueId,
+    }, actor);
+    return true;
   }
 
   async function blockedGate(companyId: string, mutex: EffectiveMutex, holderRootIssueId: string): Promise<PodMutexBlocked> {
@@ -437,6 +541,10 @@ export function podMutexService(db: Db | Executor) {
       const lease = await getLease(companyId, m.labelId, tx);
       if (lease) {
         if (lease.holderRootIssueId === m.rootIssueId) return { kind: "held" as const };
+        if (await holderInTree(companyId, lease.holderRootIssueId, m, configs, tx)) {
+          await moveLeaseHolder(tx, companyId, lease, m.rootIssueId, opts.actor);
+          return { kind: "held" as const };
+        }
         if (await treeHolds(companyId, lease.holderRootIssueId, holdingStatuses, m.labelId, tx)) {
           return { kind: "blocked" as const, holder: lease.holderRootIssueId };
         }
@@ -445,6 +553,7 @@ export function podMutexService(db: Db | Executor) {
           await logLease(tx, companyId, "pod_mutex.released", m.labelId, {
             holderRootIssueId: lease.holderRootIssueId, reason: "stale_at_gate", manual: false,
           });
+          markReleased(companyId, m.labelId);
         }
       }
       const [inserted] = await tx
@@ -486,6 +595,7 @@ export function podMutexService(db: Db | Executor) {
         await logLease(tx, companyId, "pod_mutex.released", mutex.labelId, {
           holderRootIssueId: mutex.rootIssueId, reason, manual: false,
         });
+        markReleased(companyId, mutex.labelId);
       }
       return dropped;
     });
@@ -495,6 +605,7 @@ export function podMutexService(db: Db | Executor) {
   async function heldByOther(companyId: string, mutex: EffectiveMutex): Promise<PodMutexBlocked | null> {
     const lease = await getLease(companyId, mutex.labelId);
     if (!lease || lease.holderRootIssueId === mutex.rootIssueId) return null;
+    if (await holderInTree(companyId, lease.holderRootIssueId, mutex, await listConfigs(companyId))) return null;
     if (!(await treeHolds(companyId, lease.holderRootIssueId, mutex.holdingStatuses, mutex.labelId))) return null;
     return blockedGate(companyId, mutex, lease.holderRootIssueId);
   }
@@ -581,6 +692,7 @@ export function podMutexService(db: Db | Executor) {
             AND c.hidden_at IS NULL
             AND tree.depth < ${POD_MUTEX_MAX_DEPTH}
             AND NOT c.id = ANY(tree.visited)
+            AND ${keepsTree(companyId, sql`c.id`, sql`${labelId}::uuid`)}
         ),
         queued AS (
           SELECT DISTINCT ON (q.issue_key) q.issue_key, q.agent_id
@@ -636,23 +748,52 @@ export function podMutexService(db: Db | Executor) {
   }
 
   /**
+   * A label that no longer gates (disabled or deleted) after a release: every
+   * waiting tree may go, so wake the best waiter of each tree.
+   */
+  async function wakeInert(
+    companyId: string,
+    labelId: string,
+    configs: Map<string, PodMutexConfigRow> | undefined,
+    deps: PodMutexWakeDeps,
+    resumeCompanies: Set<string>,
+  ) {
+    const asEnabled = new Map(configs ?? []);
+    asEnabled.set(labelId, { labelId, holdingStatuses: [...DEFAULT_HOLDING_STATUSES], enabled: true });
+    const byRoot = new Map<string, WaiterCandidate[]>();
+    for (const w of await listWaiters(companyId, labelId, asEnabled)) {
+      byRoot.set(w.rootIssueId, [...(byRoot.get(w.rootIssueId) ?? []), w]);
+    }
+    for (const group of byRoot.values()) {
+      const next = pickNextWaiter(group);
+      if (!next) continue;
+      if (next.queuedAgentId) resumeCompanies.add(companyId);
+      else await wakeWaiter(companyId, next, deps);
+    }
+  }
+
+  /**
    * Sweep: drop leases whose holder no longer holds (statuses, root label,
-   * disabled mutex) and wake the next waiter of every free mutex label.
-   * Waiters with a queued run are re-dispatched (cheap, idempotent; one
+   * disabled or deleted mutex) and wake the next waiter of every free mutex
+   * label. Waiters with a queued run are re-dispatched (cheap, idempotent; one
    * resume per company); a todo issue without a run is only woken right after
-   * a release.
+   * a release -- by this sweep or by any other path since the last sweep
+   * (force-release, delete, disable, failed claim, stale lease at a gate).
    */
   async function sweep(deps: PodMutexWakeDeps = {}, scope?: { companyId: string }) {
     const configRows = await x
       .select()
       .from(podMutexLabels)
       .where(scope ? eq(podMutexLabels.companyId, scope.companyId) : undefined);
-    if (configRows.length === 0) return { released: 0 };
     const leaseRows = await x
       .select()
       .from(podMutexLeases)
       .where(scope ? eq(podMutexLeases.companyId, scope.companyId) : undefined);
-    const leaseByKey = new Map(leaseRows.map((l) => [`${l.companyId}:${l.labelId}`, l]));
+    const configKeys = new Set(configRows.map((c) => releaseKey(c.companyId, c.labelId)));
+    const orphanMarks = [...releasedSinceSweep]
+      .filter((k) => !configKeys.has(k) && (!scope || k.startsWith(`${scope.companyId}:`)));
+    if (configRows.length === 0 && leaseRows.length === 0 && orphanMarks.length === 0) return { released: 0 };
+    const leaseByKey = new Map(leaseRows.map((l) => [releaseKey(l.companyId, l.labelId), l]));
     const configsByCompany = new Map<string, Map<string, PodMutexConfigRow>>();
     for (const c of configRows) {
       if (!c.enabled) continue;
@@ -662,27 +803,77 @@ export function podMutexService(db: Db | Executor) {
     }
     let released = 0;
     const resumeCompanies = new Set<string>();
+
+    // leases whose mutex config is gone (deleted outside remove()) hold nothing
+    const inert = new Map<string, { companyId: string; labelId: string }>();
+    for (const lease of leaseRows) {
+      const key = releaseKey(lease.companyId, lease.labelId);
+      if (configKeys.has(key)) continue;
+      try {
+        const dropped = await x.transaction(async (txRaw) => {
+          const tx = txRaw as unknown as Db;
+          await lockLabel(tx, lease.companyId, lease.labelId);
+          const ok = await deleteLeaseIf(tx, lease);
+          if (ok) {
+            await logLease(tx, lease.companyId, "pod_mutex.released", lease.labelId, {
+              holderRootIssueId: lease.holderRootIssueId, reason: "mutex_deleted", manual: false,
+            });
+          }
+          return ok;
+        });
+        if (dropped) {
+          released += 1;
+          inert.set(key, { companyId: lease.companyId, labelId: lease.labelId });
+        }
+      } catch (err) {
+        logger.error({ err, companyId: lease.companyId, labelId: lease.labelId }, "pod mutex sweep: orphan lease cleanup failed");
+      }
+    }
+    for (const key of orphanMarks) {
+      releasedSinceSweep.delete(key);
+      const [companyId, labelId] = key.split(":") as [string, string];
+      inert.set(key, { companyId, labelId });
+    }
+    for (const { companyId, labelId } of inert.values()) {
+      try {
+        await wakeInert(companyId, labelId, configsByCompany.get(companyId), deps, resumeCompanies);
+      } catch (err) {
+        logger.error({ err, companyId, labelId }, "pod mutex sweep: wake after delete failed");
+      }
+    }
+
     for (const config of configRows) {
       try {
-        const lease = leaseByKey.get(`${config.companyId}:${config.labelId}`) ?? null;
-        let justReleased = false;
+        const lease = leaseByKey.get(releaseKey(config.companyId, config.labelId)) ?? null;
+        // a release since the last sweep (force-release, failed claim, ...) counts once
+        let justReleased = takeReleaseMark(config.companyId, config.labelId);
         if (lease) {
           const dropped = await x.transaction(async (txRaw) => {
             const tx = txRaw as unknown as Db;
             await lockLabel(tx, config.companyId, config.labelId);
+            let holderRoot = lease.holderRootIssueId;
+            if (config.enabled) {
+              const configs = configsByCompany.get(config.companyId) ?? new Map();
+              const holder = (await resolveMany(config.companyId, [holderRoot], configs, tx)).get(holderRoot);
+              if (holder?.labelId === config.labelId && holder.rootIssueId !== holderRoot &&
+                (await moveLeaseHolder(tx, config.companyId, lease, holder.rootIssueId))) {
+                holderRoot = holder.rootIssueId;
+              }
+            }
             const holds = config.enabled &&
-              (await treeHolds(config.companyId, lease.holderRootIssueId, config.holdingStatuses, config.labelId, tx));
+              (await treeHolds(config.companyId, holderRoot, config.holdingStatuses, config.labelId, tx));
             if (holds) return false;
-            const ok = await deleteLeaseIf(tx, lease);
+            const ok = await deleteLeaseIf(tx, { id: lease.id, holderRootIssueId: holderRoot });
             if (ok) {
               await logLease(tx, config.companyId, "pod_mutex.released", config.labelId, {
-                holderRootIssueId: lease.holderRootIssueId,
+                holderRootIssueId: holderRoot,
                 reason: config.enabled ? "holder_tree_idle" : "mutex_disabled",
                 manual: false,
               });
             }
             return ok;
           });
+          // still held (by this or a newer holder): its own release wakes the next tree
           if (!dropped) continue;
           justReleased = true;
           released += 1;
@@ -691,13 +882,17 @@ export function podMutexService(db: Db | Executor) {
             "pod mutex released (holder tree no longer holds)",
           );
         }
-        if (!config.enabled) continue;
-        const waiters = (await listWaiters(config.companyId, config.labelId, configsByCompany.get(config.companyId)))
-          .filter((w) => justReleased || w.queuedAgentId);
-        const next = pickNextWaiter(waiters);
-        if (!next) continue;
-        if (next.queuedAgentId) resumeCompanies.add(config.companyId);
-        else await wakeWaiter(config.companyId, next, deps);
+        if (!config.enabled) {
+          if (justReleased) {
+            await wakeInert(config.companyId, config.labelId, configsByCompany.get(config.companyId), deps, resumeCompanies);
+          }
+          continue;
+        }
+        const waiters = await listWaiters(config.companyId, config.labelId, configsByCompany.get(config.companyId));
+        // queued runs: re-dispatch every tick (idempotent); a todo waiter only right after a release
+        if (waiters.some((w) => w.queuedAgentId)) resumeCompanies.add(config.companyId);
+        const next = pickNextWaiter(justReleased ? waiters : []);
+        if (next && !next.queuedAgentId) await wakeWaiter(config.companyId, next, deps);
       } catch (err) {
         logger.error({ err, companyId: config.companyId, labelId: config.labelId }, "pod mutex sweep failed");
       }
@@ -721,7 +916,7 @@ export function podMutexService(db: Db | Executor) {
         WITH RECURSIVE tree(root_id, issue_id, depth, visited) AS (
           SELECT i.id, i.id, 0, ARRAY[i.id]
           FROM issues i
-          WHERE i.company_id = ${companyId} AND i.id::text IN (${textList(rootIssueIds)})
+          WHERE i.company_id = ${companyId} AND i.id = ANY(${uuidArray(rootIssueIds)})
           UNION ALL
           SELECT tree.root_id, c.id, tree.depth + 1, tree.visited || c.id
           FROM tree
@@ -769,18 +964,25 @@ export function podMutexService(db: Db | Executor) {
       ? await x.select({ id: issues.id, identifier: issues.identifier }).from(issues).where(inArray(issues.id, holderIds))
       : [];
     const holderIdentifier = new Map(holderRows.map((h) => [h.id, h.identifier]));
-    const stillHolds = new Map<string, boolean>();
-    for (const lease of leaseRows) {
-      stillHolds.set(
-        lease.labelId,
-        await treeHolds(companyId, lease.holderRootIssueId, configs.get(lease.labelId)!.holdingStatuses, lease.labelId),
-      );
-    }
+    const holdsList = await treeHoldsMany(companyId, leaseRows.map((lease) => ({
+      rootIssueId: lease.holderRootIssueId,
+      holdingStatuses: configs.get(lease.labelId)!.holdingStatuses,
+      labelId: lease.labelId,
+    })));
+    const stillHolds = new Map(leaseRows.map((lease, k) => [lease.labelId, holdsList[k] === true]));
+    // a holder root that moved inside a bigger same-label tree counts as that tree
+    const holderResolved = holderIds.length ? await resolveMany(companyId, holderIds, configs) : new Map<string, EffectiveMutex | null>();
+    const holderTreeRoot = (lease: { holderRootIssueId: string; labelId: string }) => {
+      const h = holderResolved.get(lease.holderRootIssueId);
+      return h?.labelId === lease.labelId ? h.rootIssueId : lease.holderRootIssueId;
+    };
     for (const [issueId, m] of resolved) {
       if (!m) continue;
       const lease = leaseByLabel.get(m.labelId);
       const active = lease && stillHolds.get(m.labelId) ? lease : null;
-      const role: IssuePodMutexState["role"] = !active ? "free" : active.holderRootIssueId === m.rootIssueId ? "holder" : "waiting";
+      const role: IssuePodMutexState["role"] = !active
+        ? "free"
+        : active.holderRootIssueId === m.rootIssueId || holderTreeRoot(active) === m.rootIssueId ? "holder" : "waiting";
       out.set(issueId, {
         labelId: m.labelId,
         labelName: labelById.get(m.labelId)?.name ?? m.labelId,
@@ -825,6 +1027,13 @@ export function podMutexService(db: Db | Executor) {
     const holderById = new Map(holderIssues.map((i) => [i.id, i]));
     const runInfo = await holderRunInfo(companyId, holderIds);
     const configs = new Map(rows.filter((r) => r.enabled).map((r) => [r.labelId, r]));
+    const leased = rows.filter((row) => row.enabled && leaseByLabel.has(row.labelId));
+    const holdsList = await treeHoldsMany(companyId, leased.map((row) => ({
+      rootIssueId: leaseByLabel.get(row.labelId)!.holderRootIssueId,
+      holdingStatuses: row.holdingStatuses,
+      labelId: row.labelId,
+    })));
+    const stillHolding = new Map(leased.map((row, k) => [row.labelId, holdsList[k] === true]));
     const result = [];
     for (const row of rows) {
       const lease = leaseByLabel.get(row.labelId) ?? null;
@@ -838,7 +1047,7 @@ export function podMutexService(db: Db | Executor) {
           title: issue?.title ?? null,
           acquiredAt: lease.acquiredAt,
           acquiredByIssueId: lease.acquiredByIssueId,
-          stillHolding: row.enabled && (await treeHolds(companyId, lease.holderRootIssueId, row.holdingStatuses, row.labelId)),
+          stillHolding: stillHolding.get(row.labelId) ?? false,
           hasRunningRun: info?.hasRunningRun ?? false,
           lastRunActivityAt: info?.lastRunActivityAt ?? null,
         };
@@ -911,30 +1120,43 @@ export function podMutexService(db: Db | Executor) {
     return row;
   }
 
+  /** Delete the mutex config and its lease in one transaction under the label lock. */
   async function remove(companyId: string, labelId: string) {
-    const leases = await x
-      .delete(podMutexLeases)
-      .where(and(eq(podMutexLeases.companyId, companyId), eq(podMutexLeases.labelId, labelId)))
-      .returning();
-    const deleted = await x
-      .delete(podMutexLabels)
-      .where(and(eq(podMutexLabels.companyId, companyId), eq(podMutexLabels.labelId, labelId)))
-      .returning({ id: podMutexLabels.id });
-    for (const lease of leases) {
-      await logLease(x, companyId, "pod_mutex.released", labelId, {
-        holderRootIssueId: lease.holderRootIssueId, reason: "mutex_deleted", manual: true,
-      });
-    }
+    const { leases, deleted } = await x.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await lockLabel(tx, companyId, labelId);
+      const leases = await tx
+        .delete(podMutexLeases)
+        .where(and(eq(podMutexLeases.companyId, companyId), eq(podMutexLeases.labelId, labelId)))
+        .returning();
+      const deleted = await tx
+        .delete(podMutexLabels)
+        .where(and(eq(podMutexLabels.companyId, companyId), eq(podMutexLabels.labelId, labelId)))
+        .returning({ id: podMutexLabels.id });
+      for (const lease of leases) {
+        await logLease(tx, companyId, "pod_mutex.released", labelId, {
+          holderRootIssueId: lease.holderRootIssueId, reason: "mutex_deleted", manual: true,
+        });
+      }
+      return { leases, deleted };
+    });
+    if (leases.length > 0) markReleased(companyId, labelId);
     return deleted.length > 0;
   }
 
-  /** Drop the lease (admin). Returns the dropped lease or null if nothing was held. */
+  /** Drop the lease (admin), under the label lock. Returns the dropped lease or null if nothing was held. */
   async function forceRelease(companyId: string, labelId: string) {
-    const deleted = await x
-      .delete(podMutexLeases)
-      .where(and(eq(podMutexLeases.companyId, companyId), eq(podMutexLeases.labelId, labelId)))
-      .returning();
-    return deleted[0] ?? null;
+    const lease = await x.transaction(async (txRaw) => {
+      const tx = txRaw as unknown as Db;
+      await lockLabel(tx, companyId, labelId);
+      const deleted = await tx
+        .delete(podMutexLeases)
+        .where(and(eq(podMutexLeases.companyId, companyId), eq(podMutexLeases.labelId, labelId)))
+        .returning();
+      return deleted[0] ?? null;
+    });
+    if (lease) markReleased(companyId, labelId);
+    return lease;
   }
 
   return {
@@ -945,6 +1167,7 @@ export function podMutexService(db: Db | Executor) {
     resolveMany,
     resolveHypothetical,
     treeHolds,
+    treeHoldsMany,
     tryAcquire,
     releaseAcquired,
     heldByOther,
