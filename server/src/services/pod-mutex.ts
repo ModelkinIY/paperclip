@@ -193,6 +193,12 @@ export interface PodMutexWakeDeps {
   resumeQueuedRuns?: (scope: { companyId: string }) => Promise<unknown>;
 }
 
+export interface PodMutexIssueWriteInput {
+  issueId: string | null;
+  before: { status: string; parentId: string | null; labelIds: string[] } | null;
+  after: { status: string; parentId: string | null; labelIds: string[] };
+}
+
 export function podMutexService(db: Db | Executor) {
   const x = db as Db;
 
@@ -503,14 +509,12 @@ export function podMutexService(db: Db | Executor) {
    */
   async function checkIssueWrite(
     companyId: string,
-    input: {
-      issueId: string | null;
-      before: { status: string; parentId: string | null; labelIds: string[] } | null;
-      after: { status: string; parentId: string | null; labelIds: string[] };
-    },
+    inputOrLoader: PodMutexIssueWriteInput | (() => Promise<PodMutexIssueWriteInput>),
   ): Promise<{ gate: PodMutexBlocked; cause: "status" | "tree" } | null> {
     const configs = await listConfigs(companyId);
     if (configs.size === 0) return null;
+    // a loader defers the caller's own lookups (issue labels) until a mutex is configured
+    const input = typeof inputOrLoader === "function" ? await inputOrLoader() : inputOrLoader;
     const mutexAfter = await resolveHypothetical(
       companyId, { selfIssueId: input.issueId, selfLabelIds: input.after.labelIds, parentId: input.after.parentId }, configs,
     );

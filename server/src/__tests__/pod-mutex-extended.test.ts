@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -21,6 +22,7 @@ import { normalizeHoldingStatuses, podMutexService } from "../services/pod-mutex
 import { issueService } from "../services/issues.ts";
 import { attachPodMutexStates, enforcePodMutexOnIssueWrite } from "../services/pod-mutex-issue-guard.js";
 
+const sqlToQuery = PgDialect.prototype.sqlToQuery;
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
 
@@ -445,6 +447,53 @@ describeDb("pod mutex service (extended)", () => {
     insertSpy.mockRestore();
     const issuesSvc = issueService(db);
     await expect(issuesSvc.checkout(root.id, s.agentId, ["todo"], null)).resolves.toBeTruthy();
+  });
+
+  it("inert: no configured labels -> create/update guard, checkout and list issue one config lookup each, no ancestor CTE", async () => {
+    const s = await seed({ configure: false });
+    const root = await s.issue();
+    await s.tag(root.id);
+    const child = await s.issue({ parentId: root.id });
+    const queries: string[] = [];
+    const spy = vi.spyOn(PgDialect.prototype, "sqlToQuery").mockImplementation(function (this: PgDialect, ...args) {
+      const out = sqlToQuery.apply(this, args);
+      queries.push(out.sql);
+      return out;
+    });
+    const podQueries = () => queries.filter((q) => /pod_mutex|WITH RECURSIVE chain|issue_labels/.test(q));
+    const actor = { kind: "agent" as const, actorType: "agent" as const, actorId: s.agentId, agentId: s.agentId };
+    const loader = vi.fn(async () => ({
+      before: { status: "todo", parentId: null, labelIds: [s.label.id] },
+      after: { status: "in_progress", parentId: null, labelIds: [s.label.id] },
+    }));
+    try {
+      // create
+      await expect(enforcePodMutexOnIssueWrite(db, actor, {
+        companyId: s.companyId, issueId: null, before: null,
+        after: { status: "in_progress", parentId: root.id, labelIds: [s.label.id] },
+      })).resolves.toBeNull();
+      expect(podQueries()).toHaveLength(1);
+      expect(podQueries()[0]).toContain("pod_mutex_labels");
+      // update (issue labels are loaded lazily, never without config)
+      queries.length = 0;
+      await expect(enforcePodMutexOnIssueWrite(db, actor, { companyId: s.companyId, issueId: child.id, load: loader })).resolves.toBeNull();
+      expect(loader).not.toHaveBeenCalled();
+      expect(podQueries()).toHaveLength(1);
+      // checkout
+      queries.length = 0;
+      const issuesSvc = issueService(db);
+      await expect(issuesSvc.checkout(child.id, s.agentId, ["todo"], null)).resolves.toBeTruthy();
+      expect(podQueries().filter((q) => /pod_mutex|WITH RECURSIVE chain/.test(q))).toHaveLength(1);
+      // list
+      queries.length = 0;
+      const rows = await issuesSvc.list(s.companyId);
+      expect(rows.length).toBeGreaterThanOrEqual(2);
+      expect(rows.every((r) => !("podMutex" in r))).toBe(true);
+      expect(queries.filter((q) => /pod_mutex|WITH RECURSIVE chain/.test(q))).toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await s.leases()).toHaveLength(0);
   });
 
   // ---- concurrency ----

@@ -14782,7 +14782,6 @@ export function issueRoutes(
         updateFields.parentId !== undefined ||
         Array.isArray(updateFields.labelIds)
       ) {
-        const beforeLabelIds = await issueLabelIds(db, existing.id);
         await enforcePodMutexOnIssueWrite(db, {
           kind: req.actor.type === "board" ? "board" : req.actor.type === "agent" ? "agent" : "other",
           actorType: actor.actorType,
@@ -14792,11 +14791,16 @@ export function issueRoutes(
         }, {
           companyId: existing.companyId,
           issueId: existing.id,
-          before: { status: existing.status, parentId: existing.parentId, labelIds: beforeLabelIds },
-          after: {
-            status: typeof updateFields.status === "string" ? updateFields.status : existing.status,
-            parentId: updateFields.parentId === undefined ? existing.parentId : (updateFields.parentId as string | null),
-            labelIds: Array.isArray(updateFields.labelIds) ? (updateFields.labelIds as string[]) : beforeLabelIds,
+          load: async () => {
+            const beforeLabelIds = await issueLabelIds(db, existing.id);
+            return {
+              before: { status: existing.status, parentId: existing.parentId, labelIds: beforeLabelIds },
+              after: {
+                status: typeof updateFields.status === "string" ? updateFields.status : existing.status,
+                parentId: updateFields.parentId === undefined ? existing.parentId : (updateFields.parentId as string | null),
+                labelIds: Array.isArray(updateFields.labelIds) ? (updateFields.labelIds as string[]) : beforeLabelIds,
+              },
+            };
           },
         });
       }

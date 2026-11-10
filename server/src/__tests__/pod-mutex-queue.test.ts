@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -41,6 +42,7 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
+const sqlToQuery = PgDialect.prototype.sqlToQuery;
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
 
@@ -190,7 +192,20 @@ describeDb("pod mutex queue gate (startNextQueuedRunForAgent)", () => {
     await s.tag(rootB.id);
     const runA = await s.queuedRun(rootA.id);
     const runB = await s.queuedRun(rootB.id);
-    await dispatch();
+    const queries: string[] = [];
+    const spy = vi.spyOn(PgDialect.prototype, "sqlToQuery").mockImplementation(function (this: PgDialect, ...args) {
+      const out = sqlToQuery.apply(this, args);
+      queries.push(out.sql);
+      return out;
+    });
+    try {
+      await dispatch();
+    } finally {
+      spy.mockRestore();
+    }
+    // run claim: config lookups only, never the ancestor CTE or the lease table
+    expect(queries.some((q) => q.includes("pod_mutex_labels"))).toBe(true);
+    expect(queries.filter((q) => /WITH RECURSIVE chain|pod_mutex_leases/.test(q))).toHaveLength(0);
     expect((await runStatus(runA))?.status).toBe("succeeded");
     expect((await runStatus(runB))?.status).toBe("succeeded");
     expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, s.companyId))).toHaveLength(0);

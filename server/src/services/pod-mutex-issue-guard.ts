@@ -17,7 +17,7 @@ import type { IssueBlockerAttention, IssuePodMutexState } from "@paperclipai/sha
 import { conflict } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity } from "./activity-log.js";
-import { podMutexConflictDetails, podMutexConflictMessage, podMutexService } from "./pod-mutex.js";
+import { podMutexConflictDetails, podMutexConflictMessage, podMutexService, type PodMutexIssueWriteInput } from "./pod-mutex.js";
 
 export interface PodMutexWriteActor {
   /** "board" = human board user; anything else is enforced. */
@@ -46,11 +46,19 @@ export async function enforcePodMutexOnIssueWrite(
     issueId: string | null;
     before: { status: string; parentId: string | null; labelIds: string[] } | null;
     after: { status: string; parentId: string | null; labelIds: string[] };
+  } | {
+    companyId: string;
+    issueId: string | null;
+    /** Called only when a mutex label is configured (keeps unconfigured companies to one config lookup). */
+    load: () => Promise<Omit<PodMutexIssueWriteInput, "issueId">>;
   },
 ) {
   let result: Awaited<ReturnType<ReturnType<typeof podMutexService>["checkIssueWrite"]>>;
   try {
-    result = await podMutexService(db).checkIssueWrite(input.companyId, input);
+    result = await podMutexService(db).checkIssueWrite(
+      input.companyId,
+      "load" in input ? async () => ({ issueId: input.issueId, ...(await input.load()) }) : input,
+    );
   } catch (err) {
     // Fail open: the lease itself is still enforced at checkout and run claim.
     logger.warn({ err, companyId: input.companyId, issueId: input.issueId }, "pod mutex: issue write check failed");
