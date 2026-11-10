@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   companies,
   createDb,
@@ -18,6 +19,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { normalizeHoldingStatuses, podMutexService } from "../services/pod-mutex.js";
 import { issueService } from "../services/issues.ts";
+import { attachPodMutexStates, enforcePodMutexOnIssueWrite } from "../services/pod-mutex-issue-guard.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
@@ -153,26 +155,22 @@ describeDb("pod mutex service (extended)", () => {
     expect((await s.svc.sweep(s.deps(), { companyId: s.companyId })).released).toBe(1);
   });
 
-  // BUG: an empty holding-status list is accepted (service and API zod schema
-  // allow []), which silently makes the mutex a no-op: treeHolds() is always
-  // false, so every gate drops the other tree's lease and takes it. Expected:
-  // [] rejected (or treated as default).
-  it.fails("empty holding statuses are rejected or fall back to the default", async () => {
+  it("empty holding statuses fall back to the default (never a silent no-op)", async () => {
     const s = await seed();
-    expect(normalizeHoldingStatuses([])).toEqual([]); // current: passes through
+    expect(normalizeHoldingStatuses([])).toEqual(["todo", "in_progress"]);
     const row = await s.svc.upsert(s.companyId, { labelId: s.label.id, holdingStatuses: [] });
-    expect(row!.holdingStatuses.length).toBeGreaterThan(0);
+    expect(row!.holdingStatuses).toEqual(["todo", "in_progress"]);
   });
 
-  it("documents current behaviour: empty holding statuses make the mutex a no-op", async () => {
+  it("a mutex seeded with [] still excludes the other tree", async () => {
     const s = await seed({ holdingStatuses: [] });
     const rootA = await s.issue({ status: "in_progress" });
     await s.tag(rootA.id);
     const rootB = await s.issue({ status: "in_progress" });
     await s.tag(rootB.id);
     expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
-    expect((await s.svc.tryAcquire(s.companyId, rootB.id)).ok).toBe(true); // lease stolen
-    expect((await s.leases())[0]!.holderRootIssueId).toBe(rootB.id);
+    expect((await s.svc.tryAcquire(s.companyId, rootB.id)).ok).toBe(false);
+    expect((await s.leases())[0]!.holderRootIssueId).toBe(rootA.id);
   });
 
   // ---- release paths ----
@@ -220,11 +218,7 @@ describeDb("pod mutex service (extended)", () => {
     expect(await s.leases()).toHaveLength(0);
   });
 
-  // BUG: removing the mutex label from the holder root does not release the
-  // lease: treeHolds() only looks at statuses under holderRootIssueId and never
-  // checks the root still carries the label, so the (now unlabelled) tree keeps
-  // blocking every other tree until all its issues leave the holding statuses.
-  it.fails("removing the label from the holder root releases the lease", async () => {
+  it("removing the label from the holder root releases the lease", async () => {
     const s = await seed();
     const rootA = await s.issue();
     await s.tag(rootA.id);
@@ -248,7 +242,7 @@ describeDb("pod mutex service (extended)", () => {
     expect(await s.svc.tryAcquire(s.companyId, rootB.id)).toEqual({ ok: true, mutex: null });
   });
 
-  it("disabling the mutex while held lets other trees pass; the stale lease is dropped on re-enable", async () => {
+  it("disabling the mutex while held lets other trees pass; the sweep drops the disabled lease", async () => {
     const s = await seed();
     const rootA = await s.issue();
     await s.tag(rootA.id);
@@ -257,12 +251,25 @@ describeDb("pod mutex service (extended)", () => {
     expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
     await s.svc.upsert(s.companyId, { labelId: s.label.id, enabled: false });
     expect(await s.svc.tryAcquire(s.companyId, rootB.id)).toEqual({ ok: true, mutex: null });
-    // disabled configs are not swept; the lease row stays
-    expect((await s.svc.sweep(s.deps(), { companyId: s.companyId })).released).toBe(0);
-    expect(await s.leases()).toHaveLength(1);
+    expect((await s.svc.sweep(s.deps(), { companyId: s.companyId })).released).toBe(1);
+    expect(await s.leases()).toHaveLength(0);
     await s.svc.upsert(s.companyId, { labelId: s.label.id, enabled: true });
-    // A still holds (todo) -> B blocked again
-    expect((await s.svc.tryAcquire(s.companyId, rootB.id)).ok).toBe(false);
+    // free again: the first gate after re-enable wins
+    expect((await s.svc.tryAcquire(s.companyId, rootB.id)).ok).toBe(true);
+    expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(false);
+  });
+
+  it("removing the label from the holder root lets the sweep release and wake the waiter", async () => {
+    const s = await seed();
+    const rootA = await s.issue({ status: "in_progress" });
+    await s.tag(rootA.id);
+    const rootB = await s.issue();
+    await s.tag(rootB.id);
+    expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
+    await db.delete(issueLabels).where(and(eq(issueLabels.issueId, rootA.id), eq(issueLabels.labelId, s.label.id)));
+    const d = s.deps();
+    expect((await s.svc.sweep(d, { companyId: s.companyId })).released).toBe(1);
+    expect(d.wakeup).toHaveBeenCalledTimes(1);
   });
 
   it("forceRelease drops the lease and the next gate grants the other tree", async () => {
@@ -478,5 +485,149 @@ describeDb("pod mutex service (extended)", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toMatchObject({ status: 409, details: { reason: "pod_mutex_held" } });
     expect(await s.leases()).toHaveLength(1);
+  });
+  // ---- same label nested inside a holder tree (no deadlock) ----
+
+  it("same label nested in a tree uses the farthest same-label ancestor as root", async () => {
+    const s = await seed();
+    const root = await s.issue({ status: "in_progress" });
+    await s.tag(root.id);
+    const sub = await s.issue({ parentId: root.id });
+    await s.tag(sub.id); // re-tagged with the same label
+    const leaf = await s.issue({ parentId: sub.id });
+    expect((await s.svc.resolveEffectiveMutex(s.companyId, sub.id))?.rootIssueId).toBe(root.id);
+    expect((await s.svc.resolveEffectiveMutex(s.companyId, leaf.id))?.rootIssueId).toBe(root.id);
+    expect((await s.svc.tryAcquire(s.companyId, root.id)).ok).toBe(true);
+    expect((await s.svc.tryAcquire(s.companyId, leaf.id)).ok).toBe(true);
+    expect((await s.svc.tryAcquire(s.companyId, sub.id)).ok).toBe(true);
+    expect(await s.leases()).toHaveLength(1);
+    // listWaiters applies the same rule: the nested sub-tree is the holder tree, not a waiter
+    const waiters = await s.svc.listWaiters(s.companyId, s.label.id);
+    expect(new Set(waiters.map((w) => w.rootIssueId))).toEqual(new Set([root.id]));
+  });
+
+  it("a different label nested between same labels cuts the farthest-root walk", async () => {
+    const s = await seed();
+    const [other] = await db.insert(labels).values({ companyId: s.companyId, name: "pod:other", color: "#111" }).returning();
+    await s.svc.upsert(s.companyId, { labelId: other!.id });
+    const top = await s.issue();
+    await s.tag(top.id);
+    const mid = await s.issue({ parentId: top.id });
+    await s.tag(mid.id, other!.id);
+    const low = await s.issue({ parentId: mid.id });
+    await s.tag(low.id);
+    expect(await s.svc.resolveEffectiveMutex(s.companyId, low.id)).toMatchObject({ labelId: s.label.id, rootIssueId: low.id });
+  });
+
+  // ---- activity trail ----
+
+  it("lease acquired / released (auto) are in the activity log", async () => {
+    const s = await seed();
+    const root = await s.issue();
+    await s.tag(root.id);
+    expect((await s.svc.tryAcquire(s.companyId, root.id, { actor: { actorType: "agent", actorId: s.agentId, agentId: s.agentId } })).ok).toBe(true);
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, root.id));
+    await s.svc.sweep(s.deps(), { companyId: s.companyId });
+    const rows = await db.select().from(activityLog).where(eq(activityLog.companyId, s.companyId));
+    const acquired = rows.find((r) => r.action === "pod_mutex.acquired");
+    const released = rows.find((r) => r.action === "pod_mutex.released");
+    expect(acquired).toMatchObject({ entityType: "label", entityId: s.label.id, actorType: "agent", agentId: s.agentId });
+    expect(acquired!.details).toMatchObject({ holderRootIssueId: root.id });
+    expect(released!.details).toMatchObject({ holderRootIssueId: root.id, reason: "holder_tree_idle", manual: false });
+  });
+
+  // ---- lease leak ----
+
+  it("checkout that does not match drops the lease it took (no leak)", async () => {
+    const s = await seed();
+    const root = await s.issue();
+    await s.tag(root.id);
+    const issuesSvc = issueService(db);
+    await issuesSvc.checkout(root.id, s.agentId, ["backlog"], null).catch(() => null);
+    expect(await s.leases()).toHaveLength(0);
+  });
+
+  it("releaseAcquired only drops the lease the call inserted", async () => {
+    const s = await seed();
+    const rootA = await s.issue();
+    await s.tag(rootA.id);
+    const gate = await s.svc.tryAcquire(s.companyId, rootA.id);
+    expect(gate.ok && gate.acquiredLeaseId).toBeTruthy();
+    const again = await s.svc.tryAcquire(s.companyId, rootA.id);
+    expect(again.ok && again.acquiredLeaseId).toBeFalsy();
+    expect(await s.svc.releaseAcquired(s.companyId, again, "test")).toBe(false);
+    expect(await s.leases()).toHaveLength(1);
+    expect(await s.svc.releaseAcquired(s.companyId, gate, "test")).toBe(true);
+    expect(await s.leases()).toHaveLength(0);
+    // a stale handle never drops a newer lease of the same tree
+    const fresh = await s.svc.tryAcquire(s.companyId, rootA.id);
+    expect(fresh.ok).toBe(true);
+    expect(await s.svc.releaseAcquired(s.companyId, gate, "test")).toBe(false);
+    expect(await s.leases()).toHaveLength(1);
+  });
+
+  // ---- issue writes ----
+
+  it("issue write: agent status move into holding -> 409, board override -> activity, tree change -> warning", async () => {
+    const s = await seed();
+    const rootA = await s.issue({ status: "in_progress" });
+    await s.tag(rootA.id);
+    const rootB = await s.issue({ status: "backlog" });
+    await s.tag(rootB.id);
+    expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
+    const agentActor = { kind: "agent" as const, actorType: "agent" as const, actorId: s.agentId, agentId: s.agentId };
+    const boardActor = { kind: "board" as const, actorType: "user" as const, actorId: "user-1" };
+    const move = {
+      companyId: s.companyId, issueId: rootB.id,
+      before: { status: "backlog", parentId: null, labelIds: [s.label.id] },
+      after: { status: "todo", parentId: null, labelIds: [s.label.id] },
+    };
+    const err = await enforcePodMutexOnIssueWrite(db, agentActor, move).then(() => null, (e) => e);
+    expect(err).toMatchObject({
+      status: 409,
+      details: { issueId: rootB.id, reason: "pod_mutex_held", labelId: s.label.id, holderRootIssueId: rootA.id, holderIdentifier: rootA.identifier },
+    });
+    await expect(enforcePodMutexOnIssueWrite(db, boardActor, move)).resolves.toMatchObject({ cause: "status" });
+    // create in todo with the held label
+    const create = { companyId: s.companyId, issueId: null, before: null, after: { status: "todo", parentId: null, labelIds: [s.label.id] } };
+    await expect(enforcePodMutexOnIssueWrite(db, agentActor, create)).rejects.toMatchObject({ status: 409 });
+    // create under the holder tree is fine; backlog is not a holding status
+    await expect(enforcePodMutexOnIssueWrite(db, agentActor, { ...create, after: { status: "todo", parentId: rootA.id, labelIds: [] } })).resolves.toBeNull();
+    await expect(enforcePodMutexOnIssueWrite(db, agentActor, { ...create, after: { status: "backlog", parentId: null, labelIds: [s.label.id] } })).resolves.toBeNull();
+    // running unlabelled issue gets re-parented under the waiting tree: warning, not refused
+    const loose = await s.issue({ status: "in_progress" });
+    await expect(enforcePodMutexOnIssueWrite(db, agentActor, {
+      companyId: s.companyId, issueId: loose.id,
+      before: { status: "in_progress", parentId: null, labelIds: [] },
+      after: { status: "in_progress", parentId: rootB.id, labelIds: [] },
+    })).resolves.toMatchObject({ cause: "tree" });
+    const acts = (await db.select().from(activityLog).where(eq(activityLog.companyId, s.companyId))).map((r) => r.action);
+    expect(acts).toEqual(expect.arrayContaining(["pod_mutex.conflict_override", "pod_mutex.conflict_warning"]));
+    // no conflict once the holder is done
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, rootA.id));
+    await expect(enforcePodMutexOnIssueWrite(db, agentActor, move)).resolves.toBeNull();
+  });
+
+  // ---- issue presentation ----
+
+  it("issue states: holder / waiting, blocked waiter gets waiting_on_resource", async () => {
+    const s = await seed();
+    const rootA = await s.issue({ status: "in_progress" });
+    await s.tag(rootA.id);
+    const childA = await s.issue({ parentId: rootA.id });
+    const rootB = await s.issue({ status: "blocked" });
+    await s.tag(rootB.id);
+    const plain = await s.issue();
+    expect((await s.svc.tryAcquire(s.companyId, childA.id)).ok).toBe(true);
+    const rows = await attachPodMutexStates(db, s.companyId, [childA, rootB, plain].map((i) => ({ id: i.id, status: i.status })));
+    expect(rows[0]).toMatchObject({ podMutex: { role: "holder", labelName: "pod:igor-3090", rootIssueId: rootA.id } });
+    expect(rows[1]).toMatchObject({
+      podMutex: { role: "waiting", holderRootIssueId: rootA.id, holderIdentifier: rootA.identifier },
+      blockerAttention: { state: "covered", reason: "waiting_on_resource", resource: { labelName: "pod:igor-3090", holderIdentifier: rootA.identifier } },
+    });
+    expect(rows[2]).not.toHaveProperty("podMutex");
+    // list() of the issue service carries the same field
+    const listed = await issueService(db).list(s.companyId);
+    expect(listed.find((r) => r.id === rootB.id)).toMatchObject({ podMutex: { role: "waiting" } });
   });
 });

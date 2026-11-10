@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   agents,
   agentWakeupRequests,
   authUsers,
@@ -21,6 +22,9 @@ import {
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { podMutexService } from "../services/pod-mutex.js";
+import { readPodMutexRunWait } from "@paperclipai/shared";
+import { createHeartbeatQueue } from "../services/heartbeat/queue.js";
+import { createHeartbeatQueueTestDependencies as queueDeps } from "./helpers/heartbeat-queue.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -191,4 +195,80 @@ describeDb("pod mutex queue gate (startNextQueuedRunForAgent)", () => {
     expect((await runStatus(runB))?.status).toBe("succeeded");
     expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, s.companyId))).toHaveLength(0);
   }, 60_000);
+  it("records why a deferred run waits on contextSnapshot.podMutex and clears it once it starts", async () => {
+    const s = await seed();
+    const rootA = await s.issue({ status: "in_progress" });
+    await s.tag(rootA.id);
+    const rootB = await s.issue();
+    await s.tag(rootB.id);
+    expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
+    const runB = await s.queuedRun(rootB.id);
+    await dispatch();
+    const [waiting] = await db.select({ ctx: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runB));
+    expect(readPodMutexRunWait(waiting!.ctx)).toMatchObject({
+      label: "pod:igor-3090", holderRootIssueId: rootA.id, holderIdentifier: rootA.identifier,
+    });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, rootA.id));
+    await s.svc.sweep({ resumeQueuedRuns: (scope) => heartbeat.resumeQueuedRunsAfterDrain(scope) }, { companyId: s.companyId });
+    await heartbeat.drainActiveRunExecutions();
+    const [done] = await db.select({ status: heartbeatRuns.status, ctx: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runB));
+    expect(done!.status).toBe("succeeded");
+    expect(readPodMutexRunWait(done!.ctx)).toBeNull();
+  }, 60_000);
+
+  it("the run's issue resolves from issueId / nativeIssueId, not only contextSnapshot", async () => {
+    const s = await seed();
+    const rootA = await s.issue({ status: "in_progress" });
+    await s.tag(rootA.id);
+    const rootB = await s.issue();
+    await s.tag(rootB.id);
+    expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
+    const runB = await s.queuedRun(null, { issueId: rootB.id });
+    await dispatch();
+    expect(await runStatus(runB)).toMatchObject({ status: "queued" });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  }, 60_000);
+
+  describe("claimQueuedRun (every claim path, e.g. executeRun)", () => {
+    function queueWith(agentRow: Record<string, unknown> | null) {
+      const deps = queueDeps(db);
+      deps.getAgent.mockImplementation(async () => agentRow as any);
+      return { queue: createHeartbeatQueue(db, deps), deps };
+    }
+    async function loadRun(id: string) {
+      const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id));
+      return row!;
+    }
+
+    it("a direct claim of another tree's run returns null, leaves it queued and never reaches the agent", async () => {
+      const s = await seed();
+      const rootA = await s.issue({ status: "in_progress" });
+      await s.tag(rootA.id);
+      const rootB = await s.issue();
+      await s.tag(rootB.id);
+      expect((await s.svc.tryAcquire(s.companyId, rootA.id)).ok).toBe(true);
+      const runB = await s.queuedRun(rootB.id);
+      const { queue, deps } = queueWith(null);
+      expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
+      expect(deps.getAgent).not.toHaveBeenCalled();
+      expect(deps.cancelRunInternal).not.toHaveBeenCalled();
+      expect(await runStatus(runB)).toMatchObject({ status: "queued", errorCode: null });
+    }, 60_000);
+
+    it("a claim that does not go through drops the lease it took (no leak)", async () => {
+      const s = await seed();
+      const rootB = await s.issue();
+      await s.tag(rootB.id);
+      const runB = await s.queuedRun(rootB.id);
+      // agent awaiting setup: the claim keeps the run queued and returns null
+      const [agentRow] = await db.select().from(agents).where(eq(agents.id, s.agentId));
+      const { queue } = queueWith({ ...agentRow!, lifecycleState: "preparing", lifecycleHolds: [] });
+      expect(await queue.claimQueuedRun(await loadRun(runB))).toBeNull();
+      expect(await runStatus(runB)).toMatchObject({ status: "queued" });
+      expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, s.companyId))).toHaveLength(0);
+      const released = await db.select().from(activityLog)
+        .where(and(eq(activityLog.companyId, s.companyId), eq(activityLog.action, "pod_mutex.released")));
+      expect(released[0]?.details).toMatchObject({ reason: "claim_not_started" });
+    }, 60_000);
+  });
 });

@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agents,
   companies,
   createDb,
+  heartbeatRuns,
   issueLabels,
   issues,
   labels,
@@ -37,14 +39,14 @@ describeDb("pod mutex routes", () => {
     await tempDb?.cleanup();
   });
 
-  function app(actor: Record<string, unknown>) {
+  function app(actor: Record<string, unknown>, deps: Parameters<typeof podMutexRoutes>[1] = {}) {
     const a = express();
     a.use(express.json());
     a.use((req, _res, next) => {
       (req as any).actor = actor;
       next();
     });
-    a.use("/api", podMutexRoutes(db));
+    a.use("/api", podMutexRoutes(db, deps));
     a.use(errorHandler);
     return a;
   }
@@ -84,7 +86,7 @@ describeDb("pod mutex routes", () => {
     expect(byName.status).toBe(201);
 
     const rel = await request(a).post(`${base}/${c.label.id}/release`);
-    expect(rel.body).toEqual({ ok: true, released: false });
+    expect(rel.body).toEqual({ ok: true, released: false, held: false, holderRootIssueId: null, holderHasRunningRun: false });
 
     const del = await request(a).delete(`${base}/${c.label.id}`);
     expect(del.status).toBe(200);
@@ -92,8 +94,10 @@ describeDb("pod mutex routes", () => {
 
     const acts = await actions(c.companyId);
     expect(acts).toEqual(expect.arrayContaining([
-      "pod_mutex.upserted", "pod_mutex.updated", "pod_mutex.force_released", "pod_mutex.deleted",
+      "pod_mutex.upserted", "pod_mutex.updated", "pod_mutex.deleted",
     ]));
+    // releasing while nothing is held leaves no audit entry
+    expect(acts).not.toContain("pod_mutex.force_released");
     const [entry] = await db.select().from(activityLog)
       .where(and(eq(activityLog.companyId, c.companyId), eq(activityLog.action, "pod_mutex.updated")));
     expect(entry).toMatchObject({ entityType: "label", entityId: c.label.id, actorType: "user" });
@@ -117,7 +121,7 @@ describeDb("pod mutex routes", () => {
     expect(listed.body[0].holder).toMatchObject({ rootIssueId: rootA!.id, identifier: `${c.prefix}-1`, stillHolding: true });
 
     const rel = await request(a).post(`${base}/${c.label.id}/release`);
-    expect(rel.body).toEqual({ ok: true, released: true });
+    expect(rel.body).toEqual({ ok: true, released: true, held: true, holderRootIssueId: rootA!.id, holderHasRunningRun: false });
     expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, c.companyId))).toHaveLength(0);
     const [entry] = await db.select().from(activityLog)
       .where(and(eq(activityLog.companyId, c.companyId), eq(activityLog.action, "pod_mutex.force_released")));
@@ -149,18 +153,17 @@ describeDb("pod mutex routes", () => {
     expect((await request(a).post(base).send({ labelId: randomUUID() })).status).toBe(404);
   });
 
-  // BUG: empty holdingStatuses passes validation (z.array without .min(1)) and
-  // turns the mutex into a no-op (see pod-mutex-extended.test.ts).
-  it.fails("rejects an empty holdingStatuses list", async () => {
+  it("rejects an empty holdingStatuses list", async () => {
     const c = await seedCompany();
     const a = board([c.companyId]);
     const res = await request(a).post(`/api/companies/${c.companyId}/pod-mutexes`).send({ labelId: c.label.id, holdingStatuses: [] });
     expect(res.status).toBe(400);
+    await podMutexService(db).upsert(c.companyId, { labelId: c.label.id });
+    const patched = await request(a).patch(`/api/companies/${c.companyId}/pod-mutexes/${c.label.id}`).send({ holdingStatuses: [] });
+    expect(patched.status).toBe(400);
   });
 
-  // BUG: :labelId path param is not validated as a UUID; a malformed id reaches
-  // Postgres and the uuid cast error surfaces as 500 instead of 400/404.
-  it.fails("a malformed :labelId yields 4xx, not 500", async () => {
+  it("a malformed :labelId yields 400, not 500", async () => {
     const c = await seedCompany();
     const a = board([c.companyId]);
     const base = `/api/companies/${c.companyId}/pod-mutexes`;
@@ -169,7 +172,7 @@ describeDb("pod mutex routes", () => {
       (await request(a).delete(`${base}/nope`)).status,
       (await request(a).post(`${base}/nope/release`)).status,
     ];
-    expect(statuses.every((s) => s >= 400 && s < 500)).toBe(true);
+    expect(statuses).toEqual([400, 400, 400]);
   });
 
   it("company scoping: another company's board user cannot see or modify", async () => {
@@ -192,5 +195,53 @@ describeDb("pod mutex routes", () => {
     const [cfg] = await db.select().from(podMutexLabels).where(eq(podMutexLabels.companyId, c.companyId));
     expect(cfg!.enabled).toBe(true);
     expect((await request(own).get(otherBase)).body).toEqual([]);
+  });
+  it("admin actions sweep right away: narrowing holding statuses releases and wakes the waiter", async () => {
+    const c = await seedCompany();
+    const svc = podMutexService(db);
+    await svc.upsert(c.companyId, { labelId: c.label.id });
+    const [agent] = await db.insert(agents).values({
+      companyId: c.companyId, name: "Coder", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    }).returning();
+    const [rootA] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-1`, title: "A", status: "todo" }).returning();
+    const [rootB] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-2`, title: "B", status: "todo", assigneeAgentId: agent!.id }).returning();
+    await db.insert(issueLabels).values([
+      { issueId: rootA!.id, labelId: c.label.id, companyId: c.companyId },
+      { issueId: rootB!.id, labelId: c.label.id, companyId: c.companyId },
+    ]);
+    expect((await svc.tryAcquire(c.companyId, rootA!.id)).ok).toBe(true);
+    const wakeup = vi.fn(async () => null);
+    const withDeps = app({ type: "board", userId: "user-1", companyIds: [c.companyId], source: "session", isInstanceAdmin: false }, { wakeup });
+    const res = await request(withDeps).patch(`/api/companies/${c.companyId}/pod-mutexes/${c.label.id}`).send({ holdingStatuses: ["in_progress"] });
+    expect(res.status).toBe(200);
+    expect(await db.select().from(podMutexLeases).where(eq(podMutexLeases.companyId, c.companyId))).toHaveLength(0);
+    expect(wakeup).toHaveBeenCalledWith(agent!.id, expect.objectContaining({ reason: "pod_mutex_released", payload: expect.objectContaining({ issueId: rootB!.id }) }));
+    const released = await db.select().from(activityLog)
+      .where(and(eq(activityLog.companyId, c.companyId), eq(activityLog.action, "pod_mutex.released")));
+    expect(released).toHaveLength(1);
+  });
+
+  it("force-release reports a holder that still has a running run", async () => {
+    const c = await seedCompany();
+    const svc = podMutexService(db);
+    await svc.upsert(c.companyId, { labelId: c.label.id });
+    const [agent] = await db.insert(agents).values({
+      companyId: c.companyId, name: "Coder", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    }).returning();
+    const [rootA] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-1`, title: "A", status: "in_progress" }).returning();
+    const [child] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-2`, title: "A1", status: "in_progress", parentId: rootA!.id }).returning();
+    await db.insert(issueLabels).values({ issueId: rootA!.id, labelId: c.label.id, companyId: c.companyId });
+    expect((await svc.tryAcquire(c.companyId, child!.id)).ok).toBe(true);
+    await db.insert(heartbeatRuns).values({
+      companyId: c.companyId, agentId: agent!.id, status: "running", invocationSource: "automation",
+      startedAt: new Date(), contextSnapshot: { issueId: child!.id },
+    });
+    const listed = await request(board([c.companyId])).get(`/api/companies/${c.companyId}/pod-mutexes`);
+    expect(listed.body[0].holder).toMatchObject({ hasRunningRun: true });
+    expect(listed.body[0].holder.lastRunActivityAt).toBeTruthy();
+    const rel = await request(board([c.companyId])).post(`/api/companies/${c.companyId}/pod-mutexes/${c.label.id}/release`);
+    expect(rel.body).toMatchObject({ released: true, held: true, holderHasRunningRun: true });
   });
 });

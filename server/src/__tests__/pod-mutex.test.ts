@@ -39,6 +39,27 @@ describe("pod mutex pure logic", () => {
     ], cfg)).toEqual({ labelId: "L2", rootIssueId: "mid", holdingStatuses: ["in_progress"] });
   });
 
+  it("same label nested: the farthest same-label ancestor is the root", () => {
+    expect(pickEffectiveMutex([
+      { issueId: "self", depth: 0, labelId: "L1" },
+      { issueId: "mid", depth: 1, labelId: "L1" },
+      { issueId: "top", depth: 3, labelId: "L1" },
+    ], cfg)).toMatchObject({ labelId: "L1", rootIssueId: "top" });
+  });
+
+  it("a different enabled label stops the farthest-root walk; disabled labels do not", () => {
+    expect(pickEffectiveMutex([
+      { issueId: "self", depth: 0, labelId: "L1" },
+      { issueId: "mid", depth: 1, labelId: "L2" },
+      { issueId: "top", depth: 2, labelId: "L1" },
+    ], cfg)).toMatchObject({ labelId: "L1", rootIssueId: "self" });
+    expect(pickEffectiveMutex([
+      { issueId: "self", depth: 0, labelId: "L1" },
+      { issueId: "mid", depth: 1, labelId: "OFF" },
+      { issueId: "top", depth: 2, labelId: "L1" },
+    ], cfg)).toMatchObject({ labelId: "L1", rootIssueId: "top" });
+  });
+
   it("ignores disabled and unconfigured labels", () => {
     expect(pickEffectiveMutex([
       { issueId: "self", depth: 0, labelId: "OFF" },
@@ -65,6 +86,8 @@ describe("pod mutex pure logic", () => {
   it("normalizes holding statuses", () => {
     expect(normalizeHoldingStatuses(["todo", "bogus", "todo", "blocked"])).toEqual(["todo", "blocked"]);
     expect(normalizeHoldingStatuses(undefined)).toEqual(["todo", "in_progress"]);
+    expect(normalizeHoldingStatuses([])).toEqual(["todo", "in_progress"]);
+    expect(normalizeHoldingStatuses(["bogus"])).toEqual(["todo", "in_progress"]);
   });
 });
 
