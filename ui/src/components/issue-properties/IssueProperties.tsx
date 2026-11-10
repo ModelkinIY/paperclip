@@ -455,14 +455,13 @@ export function IssueProperties({
     enabled: !!companyId,
   });
 
-  // inferdyne fork: mark pod mutex labels in the picker. Board-only endpoint;
-  // a 403 (agent session) or any failure just means no marks.
+  // inferdyne fork: mark pod mutex labels in the picker. Cheap ids-only
+  // endpoint (not the Resources list); any failure just means no marks.
   const { data: podMutexLabelIds } = useQuery({
     queryKey: ["pod-mutexes", companyId, "label-ids"],
     queryFn: async () => {
       try {
-        const entries = await podMutexApi.list(companyId!);
-        return new Set(entries.filter((e) => e.enabled).map((e) => e.labelId));
+        return new Set((await podMutexApi.labelIds(companyId!)).labelIds);
       } catch {
         return new Set<string>();
       }

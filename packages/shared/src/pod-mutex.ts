@@ -69,6 +69,11 @@ export interface PodMutexConfigRowResponse {
   updatedAt: string | Date;
 }
 
+/** GET /companies/:id/pod-mutexes/labels: enabled mutex label ids only (cheap; label picker). */
+export interface PodMutexLabelsResponse {
+  labelIds: string[];
+}
+
 export interface PodMutexReleaseResponse {
   ok: true;
   /** A lease was held and has been dropped. */

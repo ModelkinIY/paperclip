@@ -1,5 +1,5 @@
 import { Router, type Request } from "express";
-import { podMutexLabelParamsSchema, podMutexUpsertSchema, type PodMutexReleaseResponse } from "@paperclipai/shared";
+import { podMutexLabelParamsSchema, podMutexUpsertSchema, type PodMutexLabelsResponse, type PodMutexReleaseResponse } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { validate } from "../middleware/validate.js";
@@ -56,6 +56,15 @@ export function podMutexRoutes(db: Db, wakeDeps: PodMutexWakeDeps = {}) {
   router.get("/companies/:companyId/pod-mutexes", async (req, res) => {
     const companyId = guard(req);
     res.json(await svc.list(companyId));
+  });
+
+  // Cheap: enabled mutex label ids only (one indexed config lookup). Any actor
+  // with company access (the label picker, agents); the full list stays board-only.
+  router.get("/companies/:companyId/pod-mutexes/labels", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const body: PodMutexLabelsResponse = { labelIds: [...(await svc.listConfigs(companyId)).keys()] };
+    res.json(body);
   });
 
   router.post("/companies/:companyId/pod-mutexes", validate(podMutexUpsertSchema), async (req, res) => {

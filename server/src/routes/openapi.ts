@@ -4967,6 +4967,15 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/pod-mutexes/labels",
+  tags: ["issues"],
+  summary: "Enabled pod mutex label ids (cheap; label picker and badges)",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/companies/{companyId}/pod-mutexes",
   tags: ["issues"],

@@ -65,6 +65,11 @@ const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
 
+const mockPodMutexApi = vi.hoisted(() => ({
+  list: vi.fn(),
+  labelIds: vi.fn(async () => ({ labelIds: [] as string[] })),
+}));
+
 const mockSidebarState = vi.hoisted(() => ({
   isMobile: false,
 }));
@@ -105,6 +110,10 @@ vi.mock("../api/auth", () => ({
 
 vi.mock("../api/access", () => ({
   accessApi: mockAccessApi,
+}));
+
+vi.mock("../api/podMutex", () => ({
+  podMutexApi: mockPodMutexApi,
 }));
 
 vi.mock("../api/instanceSettings", () => ({
@@ -2584,6 +2593,35 @@ describe("IssueProperties", () => {
     const featureButton = labelButtons.find((button) => button.textContent?.includes("Feature"));
     expect(bugButton).not.toBeUndefined();
     expect(featureButton?.querySelector("svg")).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it("marks pod mutex labels in the picker from the cheap label-ids endpoint, not the Resources list", async () => {
+    mockIssuesApi.listLabels.mockResolvedValue([
+      createLabel(),
+      createLabel({ id: "label-2", name: "pod:igor-3090", color: "#22c55e" }),
+    ]);
+    mockPodMutexApi.labelIds.mockResolvedValue({ labelIds: ["label-2"] });
+
+    const root = renderProperties(container, {
+      issue: createIssue({ labels: [createLabel()], labelIds: ["label-1"] }),
+      childIssues: [],
+      onUpdate: vi.fn(),
+      inline: true,
+    });
+    await flush();
+    const labelsTrigger = findRowTrigger(container, "Labels");
+    await act(async () => {
+      labelsTrigger!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockPodMutexApi.labelIds).toHaveBeenCalledWith("company-1");
+    expect(mockPodMutexApi.list).not.toHaveBeenCalled();
+    const icons = container.querySelectorAll('[data-slot="pod-mutex-label-icon"]');
+    expect(icons).toHaveLength(1);
+    expect(icons[0]!.closest("button")?.textContent).toContain("pod:igor-3090");
 
     act(() => root.unmount());
   });

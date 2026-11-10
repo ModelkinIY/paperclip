@@ -244,4 +244,38 @@ describeDb("pod mutex routes", () => {
     const rel = await request(board([c.companyId])).post(`/api/companies/${c.companyId}/pod-mutexes/${c.label.id}/release`);
     expect(rel.body).toMatchObject({ released: true, held: true, holderHasRunningRun: true });
   });
+  it("GET pod-mutexes/labels returns enabled label ids only, for any actor with company access", async () => {
+    const c = await seedCompany();
+    const other = await seedCompany();
+    const svc = podMutexService(db);
+    await svc.upsert(c.companyId, { labelId: c.label.id });
+    const [off] = await db.insert(labels).values({ companyId: c.companyId, name: "pod:off", color: "#111" }).returning();
+    await svc.upsert(c.companyId, { labelId: off!.id, enabled: false });
+    const url = `/api/companies/${c.companyId}/pod-mutexes/labels`;
+    expect((await request(board([c.companyId])).get(url)).body).toEqual({ labelIds: [c.label.id] });
+    const agent = app({ type: "agent", agentId: randomUUID(), companyId: c.companyId, source: "agent_key" });
+    expect((await request(agent).get(url)).body).toEqual({ labelIds: [c.label.id] });
+    expect((await request(board([other.companyId])).get(url)).status).toBe(403);
+  });
+
+  it("force-release over the API wakes a todo waiter once (sweep right away)", async () => {
+    const c = await seedCompany();
+    const svc = podMutexService(db);
+    await svc.upsert(c.companyId, { labelId: c.label.id });
+    const [agent] = await db.insert(agents).values({
+      companyId: c.companyId, name: "Coder", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    }).returning();
+    const [holder] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-1`, title: "A", status: "in_progress" }).returning();
+    const [waiter] = await db.insert(issues).values({ companyId: c.companyId, identifier: `${c.prefix}-2`, title: "B", status: "todo", assigneeAgentId: agent!.id }).returning();
+    for (const i of [holder!, waiter!]) await db.insert(issueLabels).values({ issueId: i.id, labelId: c.label.id, companyId: c.companyId });
+    expect((await svc.tryAcquire(c.companyId, holder!.id)).ok).toBe(true);
+    const wakeup = vi.fn(async () => null);
+    const a = app({ type: "board", userId: "user-1", companyIds: [c.companyId], source: "session", isInstanceAdmin: false }, { wakeup });
+    const rel = await request(a).post(`/api/companies/${c.companyId}/pod-mutexes/${c.label.id}/release`);
+    expect(rel.body).toMatchObject({ released: true });
+    await svc.sweep({ wakeup }, { companyId: c.companyId });
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect((wakeup.mock.calls[0] as unknown as [string, any])[1]).toMatchObject({ payload: { issueId: waiter!.id } });
+  });
 });

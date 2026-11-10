@@ -1,6 +1,7 @@
 import type {
   PodMutexConfigRowResponse,
   PodMutexEntry,
+  PodMutexLabelsResponse,
   PodMutexReleaseResponse,
   PodMutexUpsertInput,
 } from "@paperclipai/shared";
@@ -11,13 +12,17 @@ export type {
   PodMutexConfigRowResponse,
   PodMutexEntry,
   PodMutexHolder,
+  PodMutexLabelsResponse,
   PodMutexReleaseResponse,
   PodMutexUpsertInput,
   PodMutexWaiter,
 } from "@paperclipai/shared";
 
 export const podMutexApi = {
+  /** Full list with holder and waiters (Resources page; board only, heavier). */
   list: (companyId: string) => api.get<PodMutexEntry[]>(`/companies/${companyId}/pod-mutexes`),
+  /** Enabled mutex label ids only (label picker / badges; cheap). */
+  labelIds: (companyId: string) => api.get<PodMutexLabelsResponse>(`/companies/${companyId}/pod-mutexes/labels`),
   create: (companyId: string, data: PodMutexUpsertInput) =>
     api.post<PodMutexConfigRowResponse>(`/companies/${companyId}/pod-mutexes`, data),
   update: (companyId: string, labelId: string, data: PodMutexUpsertInput) =>
