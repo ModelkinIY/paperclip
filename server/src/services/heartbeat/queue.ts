@@ -22,6 +22,7 @@ import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { shouldHoldNewRunForWeeklyPace } from "../weekly-pace.js";
 import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
+import { podMutexService } from "../pod-mutex.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -2187,8 +2188,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
 
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+      // inferdyne fork: pod mutex (services/pod-mutex.ts). Gate per run: a run
+      // whose issue tree waits for a resource held by another tree stays
+      // queued (never skipped); other runs of the same agent go on.
+      const podMutex = podMutexService(db);
+      const podMutexActive = await podMutex.hasEnabled(agent.companyId);
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        if (podMutexActive && !queuedRun.startedAt) {
+          const mutexIssueId = readNonEmptyString(parseObject(queuedRun.contextSnapshot).issueId);
+          if (mutexIssueId) {
+            const gate = await podMutex.tryAcquire(agent.companyId, mutexIssueId);
+            if (!gate.ok) {
+              logger.debug(
+                { runId: queuedRun.id, issueId: mutexIssueId, label: gate.labelName, holder: gate.holderIdentifier },
+                "pod mutex held by another tree; run stays queued",
+              );
+              continue;
+            }
+          }
+        }
         let claimed: typeof heartbeatRuns.$inferSelect | null;
         try {
           claimed = await claimQueuedRun(queuedRun, companyAgents, deferredPostCommitEffects);

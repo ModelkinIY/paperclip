@@ -11,6 +11,7 @@ import {
   Network,
   Boxes,
   Repeat,
+  Cpu,
   Layers,
   GitBranch,
   Package,
@@ -184,6 +185,7 @@ export function Sidebar() {
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
           ) : null}
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
+          <SidebarNavItem to="/resources" label="Resources" icon={Cpu} />
           {showGoalsLink ? (
             <SidebarNavItem to="/goals" label="Goals" icon={Target} />
           ) : goalsLinkPending ? (

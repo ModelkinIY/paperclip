@@ -13,6 +13,7 @@ import {
   Network,
   Boxes,
   Repeat,
+  Cpu,
   Layers,
   GitBranch,
   Package,
@@ -242,6 +243,7 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
             </>
           ) : null}
           <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
+          <SidebarNavItem to="/resources" label="Resources" icon={Cpu} />
           <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
           {showCases ? (
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />

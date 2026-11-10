@@ -158,6 +158,7 @@ import {
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
 import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { podMutexConflictMessage, podMutexService } from "./pod-mutex.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -12258,6 +12259,22 @@ export function issueService(db: Db) {
         await notifyDeferredExecutionEligibility(tx, { companyId: issueCompany.companyId });
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
         await notifyRoutineExecutionStatus(tx, id);
+        // inferdyne fork: pod mutex (services/pod-mutex.ts) — a tree waiting
+        // for a resource held by another tree cannot check out.
+        const podMutexGate = await podMutexService(tx as unknown as Db).tryAcquire(
+          issueCompany.companyId,
+          id,
+        );
+        if (!podMutexGate.ok) {
+          throw conflict(podMutexConflictMessage(podMutexGate), {
+            issueId: id,
+            reason: "pod_mutex_held",
+            labelId: podMutexGate.mutex.labelId,
+            labelName: podMutexGate.labelName,
+            holderRootIssueId: podMutexGate.holderRootIssueId,
+            holderIdentifier: podMutexGate.holderIdentifier,
+          });
+        }
         return tx
           .update(issues)
           .set({

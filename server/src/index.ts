@@ -1,6 +1,7 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
 import { tickWeeklyPace } from "./services/weekly-pace.js";
+import { podMutexService } from "./services/pod-mutex.js";
 import { readDeployDrain } from "./services/deploy-drain.js";
 import { registerNativeRuntimeResponseDelivery } from "./services/native-runtime/native-runtime-response-delivery.js";
 import { attentionRetentionService, registerAttentionRetentionWork } from "./services/attention-retention.js";
@@ -1374,6 +1375,19 @@ async function startServerWithDatabaseTeardown(
     deployDrainWasActive = active;
   }, 15_000);
   deployDrainTimer.unref?.();
+  // inferdyne fork: pod mutex lazy release + wake next waiter (services/pod-mutex.ts).
+  const podMutex = podMutexService(db as any);
+  const podMutexTimer = setInterval(() => {
+    if (heartbeatSchedulerStopped || isWarmStandby() || readDeployDrain().active) return;
+    trackHeartbeatSchedulerWork(podMutex.sweep({
+      wakeup: heartbeat ? (agentId, opts) => heartbeat.wakeup(agentId, opts as any) : undefined,
+      resumeQueuedRuns: scope => accountingHeartbeat.resumeQueuedRunsAfterDrain(scope),
+    }).then(() => undefined).catch(err => {
+      logger.error({ err }, "pod mutex sweep failed");
+    }));
+  }, 30_000);
+  podMutexTimer.unref?.();
+  server.on("close", () => clearInterval(podMutexTimer));
   server.on("close", () => clearInterval(deployDrainTimer));
   server.on("close", () => clearInterval(weeklyPaceTimer));
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
