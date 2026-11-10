@@ -460,6 +460,8 @@ export type IssueBlockerAttentionReason =
   | "active_dependency"
   | "stalled_review"
   | "attention_required"
+  /** inferdyne fork: the issue tree waits for a pod mutex held by another tree. */
+  | "waiting_on_resource"
   | null;
 
 export interface IssueBlockerAttentionIssueSummary {
@@ -486,6 +488,8 @@ export interface IssueBlockerAttention {
   terminalBlockerIssueId?: string | null;
   /** Link-ready details for the sampled blocker, including non-terminal intermediate nodes. */
   terminalBlocker?: IssueBlockerAttentionIssueSummary | null;
+  /** inferdyne fork: set with reason "waiting_on_resource". */
+  resource?: { labelId: string; labelName: string; holderRootIssueId: string; holderIdentifier: string | null } | null;
 }
 
 export type IssueReviewAttentionState = "none" | "covered" | "stalled";
@@ -939,6 +943,8 @@ export interface Issue {
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
   blockerAttention?: IssueBlockerAttention;
+  /** inferdyne fork: pod mutex state of the issue's tree (holder / waiting). */
+  podMutex?: import("../pod-mutex.js").IssuePodMutexState | null;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
   unblockDescriptor?: IssueUnblockDescriptor | null;
@@ -1021,6 +1027,8 @@ export type CompactIssue = Pick<
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
   blockerAttention?: IssueBlockerAttention;
+  /** inferdyne fork: pod mutex state of the issue's tree (holder / waiting). */
+  podMutex?: import("../pod-mutex.js").IssuePodMutexState | null;
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
   scheduledRetry?: IssueScheduledRetry | null;

@@ -2885,3 +2885,4 @@ export {
 } from "./remote-workspace.js";
 
 export { readProviderFailure, type ProviderFailure } from "./provider-failure.generated.js";
+export * from "./pod-mutex.js";
