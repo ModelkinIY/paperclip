@@ -205,12 +205,31 @@ describe("Resources page", () => {
   it("the last holding-status chip is disabled with a hint and cannot be unticked", async () => {
     await render([{ ...HELD, holdingStatuses: ["in_progress"] }]);
     const chip = button("in_progress");
-    expect(chip.disabled).toBe(true);
+    expect(chip.getAttribute("aria-disabled")).toBe("true");
+    expect(chip.getAttribute("aria-pressed")).toBe("true");
+    const hint = container.querySelector(`#${chip.getAttribute("aria-describedby")}`);
+    expect(hint?.textContent).toContain("At least one holding status is required");
     expect(container.textContent).toContain("At least one holding status is required");
     act(() => chip.click());
     await flush();
     expect(mockPodMutexApi.update).not.toHaveBeenCalled();
-    expect(button("todo").disabled).toBe(false);
+    expect(button("todo").getAttribute("aria-disabled")).toBeNull();
+    expect(button("todo").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("gives controls per-row accessible names", async () => {
+    await render([HELD]);
+    expect(container.querySelector("input")?.getAttribute("aria-label")).toBe("Mutex label name");
+    expect(container.querySelector('[role="switch"]')?.getAttribute("aria-label")).toBe("Enabled: pod:igor-3090");
+    expect(container.querySelector('button[aria-label="Release pod:igor-3090"]')).toBeTruthy();
+    expect(container.querySelector('button[aria-label="Remove pod:igor-3090"]')).toBeTruthy();
+    expect(button("in_progress").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("surfaces a labels query error as an alert", async () => {
+    mockIssuesApi.listLabels.mockRejectedValue(new Error("labels down"));
+    await render([HELD]);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("labels down");
   });
 
   it("shows how long the holder has held the resource", async () => {
@@ -260,6 +279,6 @@ describe("Resources page", () => {
       root.render(<QueryClientProvider client={qc}><Resources /></QueryClientProvider>);
     });
     await flush();
-    expect(container.textContent).toContain("Board access required");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Board access required");
   });
 });

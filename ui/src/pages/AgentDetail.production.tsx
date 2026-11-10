@@ -2677,7 +2677,7 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
         </span>
       </div>
       {runPodMutexWaitText(run) ? (
-        <span className="text-xs text-amber-700 dark:text-amber-300 truncate pl-5.5" data-slot="run-pod-mutex-wait">
+        <span className="text-xs text-(--status-task-icon-todo) truncate pl-5.5" data-slot="run-pod-mutex-wait">
           {runPodMutexWaitText(run)}
         </span>
       ) : null}

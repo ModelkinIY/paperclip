@@ -25,9 +25,9 @@ export function PodMutexBadge({ state, className, showFree = false }: {
       data-role={state.role}
       title={text}
       className={cn(
-        "inline-flex min-w-0 max-w-full shrink items-center gap-1 rounded-full border px-1.5 py-0 text-[11px] leading-5",
-        state.role === "holder" && "border-emerald-500/40 text-emerald-700 dark:text-emerald-300",
-        state.role === "waiting" && "border-amber-500/40 text-amber-700 dark:text-amber-300",
+        "inline-flex min-w-0 max-w-full shrink items-center gap-1 rounded-full border px-2 py-0.5 text-xs",
+        state.role === "holder" && "border-(--status-task-icon-done)/40 text-(--status-task-icon-done)",
+        state.role === "waiting" && "border-(--status-task-icon-todo)/40 text-(--status-task-icon-todo)",
         state.role === "free" && "text-muted-foreground",
         className,
       )}

@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ISSUE_STATUSES, type IssueStatus } from "@paperclipai/shared";
+import { Lock } from "lucide-react";
 import { Link } from "@/lib/router";
 import { podMutexApi, type PodMutexEntry } from "../api/podMutex";
 import { issuesApi } from "../api/issues";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { EmptyState } from "../components/EmptyState";
+import { PageSkeleton } from "../components/PageSkeleton";
 import { ToggleSwitch } from "../components/ui/toggle-switch";
 import { cn } from "../lib/utils";
 import { useOptionalToastActions } from "../context/ToastContext";
@@ -90,12 +94,20 @@ export function Resources() {
     setNewLabel("");
   };
 
-  const error = list.error;
+  const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+  if (!selectedCompanyId) {
+    return <EmptyState icon={Lock} message="Select an organization to view resources." />;
+  }
+
+  if (list.isLoading) {
+    return <PageSkeleton variant="list" />;
+  }
 
   return (
-    <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-6 p-4">
-      <div>
-        <h1 className="text-lg font-semibold">Resources</h1>
+    <div className="min-w-0 space-y-6">
+      <div className="space-y-1">
+        <h1 className="text-2xl font-semibold tracking-tight">Resources</h1>
         <p className="text-sm text-muted-foreground">
           A mutex label (e.g. <code>pod:igor-3090</code>) on a root issue locks the resource for that whole issue
           tree. Other trees with the same label wait (their runs stay queued) until the holder tree has no issues in
@@ -103,13 +115,22 @@ export function Resources() {
         </p>
       </div>
 
-      {error ? <div className="text-sm text-destructive">{String((error as Error).message ?? error)}</div> : null}
+      {list.error ? (
+        <p role="alert" className="text-sm text-destructive">{errorMessage(list.error)}</p>
+      ) : null}
+      {labels.error ? (
+        <p role="alert" className="text-sm text-destructive">
+          Couldn't load existing labels for suggestions: {errorMessage(labels.error)}
+        </p>
+      ) : null}
 
       <div className="flex flex-col gap-3">
         {(list.data ?? []).length === 0 ? (
-          <div className="rounded-md border px-3 py-6 text-center text-sm text-muted-foreground">
-            {list.isLoading ? "Loading…" : "No mutex labels configured — the feature is inactive."}
-          </div>
+          <EmptyState
+            icon={Lock}
+            message="No mutex labels configured"
+            description="The feature is inactive until you add one below."
+          />
         ) : null}
         {(list.data ?? []).map((entry) => (
           <MutexRow
@@ -145,12 +166,13 @@ export function Resources() {
           submitNew();
         }}
       >
-        <input
+        <Input
+          aria-label="Mutex label name"
           list="pod-mutex-labels"
           value={newLabel}
           onChange={(e) => setNewLabel(e.target.value)}
           placeholder="Label name, e.g. pod:igor-3090"
-          className="h-9 w-full min-w-0 flex-1 rounded-md border sm:max-w-sm bg-background px-3 text-sm"
+          className="flex-1 sm:max-w-sm"
         />
         <datalist id="pod-mutex-labels">
           {freeLabels.map((l) => (
@@ -189,6 +211,7 @@ function MutexRow(props: {
   const heldMs = holder ? now - new Date(holder.acquiredAt).getTime() : 0;
   const lastActivity = holder ? new Date(holder.lastRunActivityAt ?? holder.acquiredAt).getTime() : now;
   const stale = Boolean(holder && holder.stillHolding && !holder.hasRunningRun && now - lastActivity > POD_MUTEX_STALE_MS);
+  const hintId = `pod-mutex-hint-${entry.labelId}`;
   const lastOnly = entry.holdingStatuses.length <= 1;
   return (
     <section className="flex min-w-0 flex-col gap-3 rounded-md border p-3 text-sm" data-testid="pod-mutex-row">
@@ -198,11 +221,11 @@ function MutexRow(props: {
           <span className="truncate font-medium">{entry.labelName}</span>
         </span>
         <div className="flex flex-wrap items-center gap-2">
-          <ToggleSwitch checked={entry.enabled} onCheckedChange={props.onToggleEnabled} aria-label="Enabled" />
-          <Button size="xs" variant="outline" disabled={!holder} onClick={props.onRelease}>
+          <ToggleSwitch checked={entry.enabled} onCheckedChange={props.onToggleEnabled} aria-label={`Enabled: ${entry.labelName}`} />
+          <Button size="xs" variant="outline" disabled={!holder} onClick={props.onRelease} aria-label={`Release ${entry.labelName}`}>
             Release
           </Button>
-          <Button size="xs" variant="ghost" onClick={props.onRemove}>
+          <Button size="xs" variant="ghost" onClick={props.onRemove} aria-label={`Remove ${entry.labelName}`}>
             Remove
           </Button>
         </div>
@@ -221,7 +244,7 @@ function MutexRow(props: {
           <span className="text-muted-foreground">free</span>
         )}
         {stale ? (
-          <div role="alert" className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          <div role="alert" className="mt-1 text-xs text-(--status-task-icon-todo)">
             Warning: the holder tree has had no running run for over 30 min — check it, or force-release.
           </div>
         ) : null}
@@ -256,9 +279,12 @@ function MutexRow(props: {
               <button
                 key={status}
                 type="button"
-                disabled={locked}
-                title={locked ? "At least one holding status is required" : undefined}
-                onClick={() => props.onToggleStatus(status)}
+                aria-pressed={on}
+                aria-disabled={locked || undefined}
+                aria-describedby={locked ? hintId : undefined}
+                onClick={() => {
+                  if (!locked) props.onToggleStatus(status);
+                }}
                 className={cn(
                   "rounded-full border px-2 py-0.5 text-xs",
                   on ? "border-primary bg-primary/10 text-foreground" : "text-muted-foreground",
@@ -271,7 +297,7 @@ function MutexRow(props: {
           })}
         </div>
         {lastOnly ? (
-          <p className="mt-1 text-xs text-muted-foreground">At least one holding status is required.</p>
+          <p id={hintId} className="mt-1 text-xs text-muted-foreground">At least one holding status is required.</p>
         ) : null}
       </div>
     </section>
