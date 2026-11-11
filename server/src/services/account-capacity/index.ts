@@ -9,3 +9,4 @@ export { accountCapacity, limitSettingsStore, resetAccountCapacityForTests } fro
 export { tickAccountLimits, probeGrant, discoverTrackedGrants, listActiveUserMemberships, type AccountProbeUsage, type TrackedGrant } from "./probe.js";
 export { createAccountLimitGate, resolveRunAccountCandidates, type AccountCandidate } from "./gate.js";
 export { DbLimitSettingsStore } from "./settings-db.js";
+export { filterByAccountLimit, type PoolCandidateAccount } from "./pool.js";

@@ -1,4 +1,5 @@
 import type { ConnectionManagementContext } from "./connection-management.js";
+import { accountCapacity, filterByAccountLimit } from "./account-capacity/index.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { aiConnectionPools, aiConnectionRouterCursors, aiConnectionTaskPins, companySecrets, connectionGrants, instanceSettings, plugins, toolApplications, toolConnections, toolConnectionInstalls, type Db } from "@paperclipai/db";
@@ -245,6 +246,14 @@ export function aiConnectionRouterService(db: Db, workerManager?: PluginWorkerMa
         const existing = candidates.find((candidate) => candidate.member.binding.grantId === input.existingGrantId);
         if (!existing) throw unprocessable("Reset this task session before adopting the connection pool");
         candidates.splice(0, candidates.length, existing);
+      }
+      // inferdyne fork: accounts that are ahead of their limit pace take no new work from the pool.
+      if (!pin && candidates.length > 0) {
+        const { open, retryAt } = filterByAccountLimit(candidates, (c) => c.member.binding, accountCapacity);
+        if (open.length === 0) {
+          throw new AiConnectionPoolExhausted((retryAt ?? new Date(Date.now() + 5 * 60_000)).toISOString(), pool.id);
+        }
+        candidates.splice(0, candidates.length, ...open);
       }
       if (pool.mode === "usage_aware" && input.userId) {
         // At most four provider calls at once; the shared deadline bounds the whole pool.
