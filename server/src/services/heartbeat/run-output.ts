@@ -1,7 +1,6 @@
 import { notifyActiveRunSilence } from "../live-run-recovery-notifications.js";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
-import { createRateLimitEventScanner } from "../weekly-pace.js";
 import { accountCapacity, createAccountRateLimitScanner } from "../account-capacity/index.js";
 import type { AdapterInvocationMeta, AdapterRuntimeEvent } from "../../adapters/index.js";
 import { redactCurrentUserText, type CurrentUserRedactionOptions } from "../../log-redaction.js";
@@ -253,14 +252,12 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
       if (waitForCommit) await recorded;
       else void recorded.catch(reportRecordingFailure);
     };
-    const rateLimitScanner = createRateLimitEventScanner(run.companyId);
     const accountLimitScanner = createAccountRateLimitScanner(
       () => input.resolveAiGrantId?.(),
       (grantId, observation) => accountCapacity.record(grantId, observation),
     );
     const onLog = (stream: "stdout" | "stderr", chunk: string) => {
       if (stream === "stdout") {
-        try { rateLimitScanner.push(chunk); } catch { /* observation is best effort */ }
         try { accountLimitScanner.push(chunk); } catch { /* observation is best effort */ }
       }
       const external = handle?.store === "s3_segments";

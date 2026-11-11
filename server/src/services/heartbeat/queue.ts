@@ -20,7 +20,7 @@ import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
-import { shouldHoldNewRunForWeeklyPace } from "../weekly-pace.js";
+import { accountCapacity, createAccountLimitGate } from "../account-capacity/index.js";
 import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
 import { podMutexService, type PodMutexGate, type PodMutexPass } from "../pod-mutex.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -976,6 +976,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
+  const accountLimitGate = createAccountLimitGate(db, accountCapacity);
+
   // inferdyne fork: pod mutex (services/pod-mutex.ts). Every claim path goes
   // through here, so the gate cannot be bypassed (executeRun, the per-agent
   // queue loop, recovery). The gate runs AFTER every deferral/cancel check of
@@ -996,10 +998,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const mutexIssueId = run.startedAt
       ? null
       : run.issueId ?? run.nativeIssueId ?? readNonEmptyString(parseObject(run.contextSnapshot).issueId);
-    if (!mutexIssueId) return claimQueuedRunUngated(run, companyAgents, deferredPostCommitEffects);
+    // inferdyne fork: the run's AI account may be over its limit pace; the run
+    // then stays queued (before any pod mutex lease is taken) and says why.
+    const passAccountLimitGate = () => accountLimitGate.pass(run);
+    if (!mutexIssueId) return claimQueuedRunUngated(run, companyAgents, deferredPostCommitEffects, passAccountLimitGate);
     const podMutex = podMutexService(db);
     let gate: PodMutexGate | null = null;
     const passMutexGate = async () => {
+      if (!(await passAccountLimitGate())) return false;
       gate = await podMutex.tryAcquire(run.companyId, mutexIssueId, {
         pass: podMutexPass,
         actor: { actorType: "system", actorId: "pod_mutex", agentId: run.agentId, runId: run.id },
@@ -2167,9 +2173,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .orderBy(asc(heartbeatRuns.createdAt));
       if (queuedRuns.length === 0) return [];
       if (queuedRuns.every(run => !run.startedAt) && !await canStartNewExternalBotWork(agent)) return [];
-      // inferdyne fork: pace-held agents keep new runs queued while the weekly
-      // window is ahead of an even pace; started runs are never held.
-      if (queuedRuns.every(run => !run.startedAt) && shouldHoldNewRunForWeeklyPace(agent)) return [];
       // inferdyne fork: a planned board upgrade holds every new run (deploy/upgrade.sh).
       if (queuedRuns.every(run => !run.startedAt) && shouldHoldNewRunForDeploy()) return [];
 

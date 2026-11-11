@@ -7,3 +7,4 @@ export { getPaceModel, registerPaceModel, paceModelIds, type PaceModel } from ".
 export { createAccountRateLimitScanner } from "./scanner.js";
 export { accountCapacity, limitSettingsStore } from "./runtime.js";
 export { tickAccountLimits, probeGrant, discoverTrackedGrants, listActiveUserMemberships, type AccountProbeUsage, type TrackedGrant } from "./probe.js";
+export { createAccountLimitGate, resolveRunAccountCandidates, type AccountCandidate } from "./gate.js";

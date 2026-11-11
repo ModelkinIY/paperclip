@@ -1,6 +1,5 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
-import { tickWeeklyPace } from "./services/weekly-pace.js";
 import { accountCapacity, listActiveUserMemberships, tickAccountLimits } from "./services/account-capacity/index.js";
 import { podMutexService } from "./services/pod-mutex.js";
 import { readDeployDrain } from "./services/deploy-drain.js";
@@ -1349,24 +1348,13 @@ async function startServerWithDatabaseTeardown(
     }));
   });
   server.on("close", () => { void taskDrainExpiryWork.stop(); });
-  // inferdyne fork: weekly pace hold (services/weekly-pace.ts).
-  const weeklyPaceUsage = aiConnectionService(db as any);
-  const weeklyPaceTimer = setInterval(() => {
-    if (heartbeatSchedulerStopped || isWarmStandby()) return;
-    trackHeartbeatSchedulerWork(tickWeeklyPace(db as any, {
-      usage: { list: (c, u) => weeklyPaceUsage.list(c, u) as any, probeUsage: (c, u, id) => weeklyPaceUsage.probeUsage(c, u, id) as any },
-      resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
-    }).catch(err => {
-      logger.error({ err }, "weekly pace tick failed");
-    }));
-  }, 120_000);
-  weeklyPaceTimer.unref?.();
-  // inferdyne fork: per-account limit observations (services/account-capacity).
+  // inferdyne fork: per-account limit observations and gate (services/account-capacity).
+  const accountLimitsUsage = aiConnectionService(db as any);
   const accountLimitsTimer = setInterval(() => {
     if (heartbeatSchedulerStopped || isWarmStandby()) return;
     trackHeartbeatSchedulerWork(tickAccountLimits(accountCapacity, {
       memberships: () => listActiveUserMemberships(db as any),
-      usage: weeklyPaceUsage as any,
+      usage: accountLimitsUsage as any,
       resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
     }).catch(err => {
       logger.error({ err }, "account limits tick failed");
@@ -1402,7 +1390,7 @@ async function startServerWithDatabaseTeardown(
   podMutexTimer.unref?.();
   server.on("close", () => clearInterval(podMutexTimer));
   server.on("close", () => clearInterval(deployDrainTimer));
-  server.on("close", () => { clearInterval(weeklyPaceTimer); clearInterval(accountLimitsTimer); });
+  server.on("close", () => clearInterval(accountLimitsTimer));
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
   if (runEvidenceMigrationWork) trackHeartbeatSchedulerWork(runEvidenceMigrationWork.ready);
