@@ -114,7 +114,8 @@ const HTTP_METHODS = new Set([
   "patch",
   "trace",
 ]);
-const explicitOpenApiCoverageExclusions = new Set<string>();
+// inferdyne fork: board-only deploy banner state (GET /api/deploy-drain), not part of the public spec.
+const explicitOpenApiCoverageExclusions = new Set<string>(["deploy-drain.ts"]);
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
   // Exact Cloud-control signed action; ordinary board/agent credentials cannot invoke it.
