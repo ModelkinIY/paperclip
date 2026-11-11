@@ -71,6 +71,8 @@ export interface WindowVerdict extends LimitWindow {
   elapsedPercent: number | null;
   delta: number | null;
   hold: boolean;
+  /** Expected moment this window stops holding, if nothing more is spent. */
+  releaseAt: Date | null;
 }
 
 export interface Capacity {

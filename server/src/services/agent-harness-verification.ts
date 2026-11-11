@@ -59,7 +59,7 @@ export function agentHarnessVerificationService(db: Db, manager: PluginWorkerMan
     if (binding?.mode === "router") {
       const selected = await aiConnectionRouterService(db, manager).resolve({ companyId: agent.companyId,
         poolId: binding.connectionId, agentId: agent.id, userId: responsibleUserId,
-        adapterType: agent.adapterType, taskKey: `lifecycle:${agent.lifecycleOperation!.id}` });
+        adapterType: agent.adapterType, taskKey: `lifecycle:${agent.lifecycleOperation!.id}`, ignoreAccountLimit: true });
       binding = selected.binding;
       config = { ...config, ...selected.runtimeConfig };
     }

@@ -19,8 +19,10 @@ export function evaluateObservation(
   const nextHeld: HeldState = {};
   const windows: WindowVerdict[] = observation.windows.map((w) => {
     const role = policy.roleOf(w);
-    const base = { ...w, role, expectedPercent: null, elapsedPercent: null, delta: null, hold: false };
+    const base = { ...w, role, expectedPercent: null, elapsedPercent: null, delta: null, hold: false, releaseAt: null as Date | null };
     if (role === "other") return base;
+    // A window past its reset has started over: the old reading says nothing about it.
+    if (w.resetsAt && w.resetsAt.getTime() <= now.getTime()) return base;
     const exhausted = w.limitReached === true || (w.usedPercent != null && w.usedPercent >= 100);
     if (w.usedPercent == null) return { ...base, hold: exhausted };
     const params = role === "short" ? settings.fiveHour : settings.weekly;
@@ -30,7 +32,7 @@ export function evaluateObservation(
       now,
     );
     return { ...base, elapsedPercent: r.elapsedPercent, expectedPercent: r.expectedPercent, delta: r.delta,
-      hold: r.hold || exhausted };
+      hold: r.hold || exhausted, releaseAt: exhausted ? w.resetsAt : (r.releaseAt ?? null) };
   });
 
   const tracked = windows.filter((w) => w.role !== "other");
@@ -51,7 +53,8 @@ export function evaluateObservation(
   const first = holding[0]!;
   const exhausted = first.limitReached === true || (first.usedPercent != null && first.usedPercent >= 100);
   const reason = exhausted ? "window_exhausted" : first.role === "short" ? "short_window_ahead_of_pace" : "weekly_ahead_of_pace";
-  const resets = holding.map((w) => w.resetsAt).filter((d): d is Date => d != null);
-  const heldUntil = resets.length > 0 ? new Date(Math.min(...resets.map((d) => d.getTime()))) : null;
+  // The account is free again when its last holding window lifts.
+  const lifts = holding.map((w) => w.releaseAt).filter((d): d is Date => d != null);
+  const heldUntil = lifts.length > 0 ? new Date(Math.max(...lifts.map((d) => d.getTime()))) : null;
   return { available: false, headroom, reason, windows, heldUntil, nextHeld };
 }

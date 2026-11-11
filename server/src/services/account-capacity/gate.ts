@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { agents, aiProviderDefaults, connectionGrants, toolConnections, type Db } from "@paperclipai/db";
+import { agents, aiProviderDefaults, companies, connectionGrants, toolConnections, type Db } from "@paperclipai/db";
 import {
   aiConnectionMetadataSchema,
   aiRuntimeConnectionBindingSchema,
@@ -32,9 +32,15 @@ export async function resolveRunAccountCandidates(db: Db, run: RunRow): Promise<
   let grantId: string | null = null;
   if (b.mode === "shared" || b.mode === "delegated") grantId = b.grantId;
   else if (b.mode === "responsible_user") {
-    if (!run.responsibleUserId) return [];
+    // The run's own user, else the company default the start would fall back to.
+    let userId = run.responsibleUserId;
+    if (!userId) {
+      const [company] = await db.select({ userId: companies.defaultResponsibleUserId }).from(companies).where(eq(companies.id, run.companyId)).limit(1);
+      userId = company?.userId ?? null;
+    }
+    if (!userId) return [];
     const [row] = await db.select({ grantId: aiProviderDefaults.grantId }).from(aiProviderDefaults).where(and(
-      eq(aiProviderDefaults.companyId, run.companyId), eq(aiProviderDefaults.userId, run.responsibleUserId),
+      eq(aiProviderDefaults.companyId, run.companyId), eq(aiProviderDefaults.userId, userId),
       eq(aiProviderDefaults.provider, b.provider))).limit(1);
     grantId = row?.grantId ?? null;
   }
@@ -58,7 +64,8 @@ export function createAccountLimitGate(db: Db, store: AccountCapacityStore, now:
       SET context_snapshot = (CASE WHEN jsonb_typeof(context_snapshot) = 'object' THEN context_snapshot ELSE '{}'::jsonb END)
         || jsonb_build_object('aiLimitWait', ${JSON.stringify(wait)}::jsonb)
       WHERE id = ${runId} AND status = 'queued'
-        AND (context_snapshot -> 'aiLimitWait' ->> 'reason') IS DISTINCT FROM ${wait.reason}
+        AND ((context_snapshot -> 'aiLimitWait' ->> 'reason') IS DISTINCT FROM ${wait.reason}
+          OR (context_snapshot -> 'aiLimitWait' ->> 'heldUntil') IS DISTINCT FROM ${wait.heldUntil})
     `);
   }
   async function clearWait(runId: string) {
@@ -71,6 +78,11 @@ export function createAccountLimitGate(db: Db, store: AccountCapacityStore, now:
     /** true: the run may start. */
     async pass(run: RunRow): Promise<boolean> {
       if (run.startedAt) return true;
+      // Nothing is tracked anywhere: skip every query on the hot claim path.
+      if (!store.anyEnabled()) {
+        if (readAiLimitRunWait(run.contextSnapshot)) await clearWait(run.id).catch(() => undefined);
+        return true;
+      }
       try {
         const candidates = await resolveRunAccountCandidates(db, run);
         const capacities = candidates.map((c) => ({ c, cap: store.getCapacity(c.grantId, c.provider, c.method, now()) }));

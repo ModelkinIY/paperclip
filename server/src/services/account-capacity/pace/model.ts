@@ -13,6 +13,8 @@ export interface PaceResult {
   expectedPercent: number | null;
   delta: number | null;
   hold: boolean;
+  /** When a hold is expected to lift if nothing more is spent; null when not held or unknown. */
+  releaseAt?: Date | null;
 }
 
 /** A replaceable way to judge whether spending is ahead of an acceptable pace. */

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AccountCapacityStore, DEFAULT_LIMIT_SETTINGS, InMemoryLimitSettingsStore } from "./index.js";
-import { resetAccountProbeStateForTests, tickAccountLimits, type AccountProbeUsage } from "./probe.js";
+import { probeGrant, resetAccountProbeStateForTests, tickAccountLimits, type AccountProbeUsage } from "./probe.js";
 
 const WEEK = 604_800;
 const t0 = new Date("2026-11-04T12:00:00Z");
@@ -77,5 +77,40 @@ describe("account limit tick", () => {
     probeUsage.mockRejectedValue(new Error("boom"));
     await expect(tick()).resolves.toBeDefined();
     expect(store.getCapacity("gA", "anthropic", "subscription", t0).available).toBe(true);
+  });
+});
+
+describe("probe failures and waiting runs", () => {
+  const grant = { companyId: "c1", grantId: "gA", connectionId: "cA", provider: "anthropic" as const, method: "subscription" as const, userId: "u1" };
+
+  it("backs off a failing account and reports a failed forced refresh without delaying the background probe", async () => {
+    const { store, probeUsage } = setup({ current: 45 });
+    probeUsage.mockRejectedValue(new Error("boom"));
+    const usage = { list: async () => [], probeUsage } as unknown as AccountProbeUsage;
+    expect(await probeGrant(store, usage, grant, t0)).toBe("failed");
+    expect(await probeGrant(store, usage, grant, new Date(t0.getTime() + 30_000))).toBe("skipped");
+    expect(await probeGrant(store, usage, grant, new Date(t0.getTime() + 61_000))).toBe("failed"); // second failure: back off 2 min
+    expect(await probeGrant(store, usage, grant, new Date(t0.getTime() + 61_000 + 100_000))).toBe("skipped");
+    expect(await probeGrant(store, usage, grant, new Date(t0.getTime() + 61_000 + 130_000))).toBe("failed");
+    const forced = await probeGrant(store, usage, grant, new Date(t0.getTime() + 61_000 + 200_000), true);
+    expect(forced).toBe("failed");
+  });
+
+  it("a failed refresh does not block the next background probe", async () => {
+    const { store, probeUsage } = setup({ current: 45 });
+    const usage = { list: async () => [], probeUsage } as unknown as AccountProbeUsage;
+    probeUsage.mockRejectedValueOnce(new Error("denied"));
+    expect(await probeGrant(store, usage, grant, t0, true)).toBe("failed");
+    probeUsage.mockResolvedValueOnce({ status: "ok", limits: limit(10, t0) });
+    expect(await probeGrant(store, usage, grant, new Date(t0.getTime() + 1000))).toBe("ok");
+  });
+
+  it("resumes the queue for runs waiting on an account that is open or no longer tracked", async () => {
+    const used = { current: 45 };
+    const { store, resume, clock } = setup(used);
+    const usage: AccountProbeUsage = { list: async () => [], probeUsage: vi.fn() };
+    // Nothing tracked; a run still waits on a vanished account.
+    await tickAccountLimits(store, { memberships: async () => [], usage, resumeQueuedRuns: resume, waitingGrantIds: async () => new Set(["gone"]), now: () => clock.now });
+    expect(resume).toHaveBeenCalledTimes(1);
   });
 });

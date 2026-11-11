@@ -478,7 +478,7 @@ export function AgentDetail() {
     } satisfies BudgetPolicySummary;
   }, [agent, budgetOverview?.policies, resolvedCompanyId, routeAgentRef]);
   const mobileLiveRun = useMemo(
-    () => (heartbeats ?? []).find((r) => r.status === "running" || r.status === "queued") ?? null,
+    () => (heartbeats ?? []).find(isRunLive) ?? null,
     [heartbeats],
   );
 
@@ -1122,6 +1122,12 @@ export function runPodMutexWaitText(run: Pick<HeartbeatRun, "status" | "contextS
   return wait ? `queued — ${podMutexWaitLabel(wait)}` : null;
 }
 
+/** inferdyne fork: running, or queued for a reason other than an AI account limit. */
+export function isRunLive(run: Pick<HeartbeatRun, "status" | "contextSnapshot">): boolean {
+  if (run.status === "running") return true;
+  return run.status === "queued" && !readAiLimitRunWait(run.contextSnapshot);
+}
+
 /** inferdyne fork: "queued — waiting for Claude main limit" for a run held by its AI account's limit pace. */
 export function runAiLimitWaitText(run: Pick<HeartbeatRun, "status" | "contextSnapshot">): string | null {
   if (run.status !== "queued") return null;
@@ -1182,7 +1188,7 @@ function LatestRunCard({
     [runs]
   );
 
-  const liveRun = sorted.find((r) => r.status === "running" || r.status === "queued");
+  const liveRun = sorted.find(isRunLive);
   const run = liveRun ?? sorted[0];
 
   // The assigned-issues list this card resolves against is bounded (server page
@@ -1225,7 +1231,7 @@ function LatestRunCard({
 
   if (!run) return null;
 
-  const isLive = run.status === "running" || run.status === "queued";
+  const isLive = isRunLive(run);
   // Fold any directly-fetched fallback issue into the lookup, keyed by the same
   // snapshot id used to resolve the row so it hits regardless of id-vs-slug.
   const effectiveIssuesById =

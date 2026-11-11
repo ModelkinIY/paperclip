@@ -38,6 +38,7 @@ export function formatUntil(iso: string | null, now = Date.now()) {
 export function formatAge(iso: string | null, now = Date.now()) {
   if (!iso) return "never";
   const min = Math.round((now - new Date(iso).getTime()) / 60_000);
+  if (min < 0) return "in the future";
   if (min < 1) return "just now";
   if (min < 90) return `${min} min ago`;
   return `${Math.round(min / 60)} h ago`;
@@ -125,7 +126,7 @@ function Details(props: {
         <h2 className="text-base font-semibold">{a.accountName}</h2>
         <StatusBadge account={a} />
         <span className="text-sm text-muted-foreground">{REASON_LABEL[c.reason] ?? c.reason}</span>
-        {c.heldUntil && !c.available && <span className="text-sm text-muted-foreground">until {formatUntil(c.heldUntil)}</span>}
+        {c.heldUntil && !c.available && <span className="text-sm text-muted-foreground">expected back {formatUntil(c.heldUntil)}</span>}
       </div>
 
       {!a.limitsSupported ? (
@@ -144,8 +145,8 @@ function Details(props: {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead><tr className="text-left text-xs text-muted-foreground">
-                <th className="py-1 pr-3">Window</th><th className="pr-3">Used</th><th className="pr-3">Expected</th>
-                <th className="pr-3">Delta</th><th className="pr-3">Resets</th><th className="w-40">Pace</th>
+                <th scope="col" className="py-1 pr-3">Window</th><th scope="col" className="pr-3">Used</th><th scope="col" className="pr-3">Expected</th>
+                <th scope="col" className="pr-3">Delta</th><th scope="col" className="pr-3">Resets</th><th scope="col" className="w-40">Pace</th>
               </tr></thead>
               <tbody>
                 {c.windows.length === 0 && <tr><td colSpan={6} className="py-3 text-muted-foreground">No measurement yet.</td></tr>}
@@ -172,8 +173,8 @@ function Details(props: {
                 {[...new Set([a.settings.paceModel, ...a.paceModels])].map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </div>
-            <ParamsEditor title="Weekly" value={a.settings.weekly} disabled={props.busy} onSave={(weekly) => props.onPatch({ weekly })} />
-            <ParamsEditor title="5-hour" value={a.settings.fiveHour} disabled={props.busy} onSave={(fiveHour) => props.onPatch({ fiveHour })} />
+            <ParamsEditor key={`${a.grantId}:weekly`} title="Weekly" value={a.settings.weekly} disabled={props.busy} onSave={(weekly) => props.onPatch({ weekly })} />
+            <ParamsEditor key={`${a.grantId}:5h`} title="5-hour" value={a.settings.fiveHour} disabled={props.busy} onSave={(fiveHour) => props.onPatch({ fiveHour })} />
             <p className="text-xs text-muted-foreground">
               Delta is used share minus the share of the window that has passed. New runs wait while it is above “hold above” and start again at or below “release at or below”. Running work is never interrupted.
             </p>
@@ -235,13 +236,15 @@ export function SubscriptionLimit({ companyId }: { companyId: string }) {
   });
 
   if (list.isLoading) return <PageSkeleton variant="list" />;
-  if (list.error) return <p className="p-4 text-sm text-destructive">{list.error instanceof Error ? list.error.message : "Couldn't load accounts."}</p>;
+  if (list.error && !list.data) return <p className="p-4 text-sm text-destructive">{list.error instanceof Error ? list.error.message : "Couldn't load accounts."}</p>;
   if (accounts.length === 0) {
     return <EmptyState icon={Gauge} message="No AI accounts are connected yet. Connect a subscription to track its limits." />;
   }
 
   return (
-    <div className="grid gap-6 md:grid-cols-[18rem_1fr]" data-testid="subscription-limit">
+    <div className="space-y-3" data-testid="subscription-limit">
+    {list.error && <p className="rounded border border-destructive/40 px-3 py-2 text-sm text-destructive" role="alert" data-testid="limit-refresh-error">Couldn't refresh; showing the last data.</p>}
+    <div className="grid gap-6 md:grid-cols-[18rem_1fr]">
       <nav aria-label="AI accounts" className="space-y-4">
         {groups.map(([provider, items]) => (
           <div key={provider}>
@@ -250,7 +253,7 @@ export function SubscriptionLimit({ companyId }: { companyId: string }) {
               {items.map((a) => (
                 <li key={a.grantId}>
                   <div className={cn("flex items-center gap-2 rounded border px-2 py-1.5", current?.grantId === a.grantId && "border-foreground/40 bg-accent/40")}>
-                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelected(a.grantId)} aria-current={current?.grantId === a.grantId}>
+                    <button type="button" className="min-w-0 flex-1 text-left" onClick={() => setSelected(a.grantId)} aria-current={current?.grantId === a.grantId ? "true" : undefined}>
                       <div className="truncate text-sm font-medium">{a.accountName}</div>
                       <div className="mt-0.5 flex items-center gap-1.5"><StatusBadge account={a} />
                         {a.capacity.headroom != null && a.limitsSupported && <span className="text-xs text-muted-foreground">{pct(a.capacity.headroom, 0)} left</span>}</div>
@@ -270,6 +273,7 @@ export function SubscriptionLimit({ companyId }: { companyId: string }) {
         <Details account={current} busy={update.isPending || refresh.isPending}
           onPatch={(patch) => update.mutate({ grantId: current.grantId, patch })} onRefresh={() => refresh.mutate(current.grantId)} />
       )}
+    </div>
     </div>
   );
 }

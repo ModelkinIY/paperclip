@@ -37,6 +37,8 @@ describe("pool filtering by account limit", () => {
     const s = store({ a: 80, b: 90 });
     const { open, retryAt } = filterByAccountLimit([member("a"), member("b")], (m) => m, s, now);
     expect(open).toEqual([]);
-    expect(retryAt?.getTime()).toBe(now.getTime() + 0.6 * WEEK * 1000);
+    // Back when the window has passed used% + 2 points: 80 % used -> 82 % elapsed, 90 % -> 92 %. The earlier one wins.
+    const resetsAt = now.getTime() + 0.6 * WEEK * 1000;
+    expect(retryAt?.getTime()).toBe(resetsAt - WEEK * 1000 * (1 - 0.82));
   });
 });

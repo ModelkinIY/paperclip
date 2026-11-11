@@ -41,7 +41,7 @@ describe("linear pace, weekly window", () => {
     const c = cap(store);
     expect(c.available).toBe(false);
     expect(c.reason).toBe("weekly_ahead_of_pace");
-    expect(c.heldUntil?.getTime()).toBe(resetsFor(40, WEEK).getTime());
+    expect(c.heldUntil?.getTime()).toBeCloseTo(resetsFor(40, WEEK).getTime() - WEEK * 1000 * (1 - 0.47), -2);
     expect(c.windows.find((w) => w.id === "seven_day")?.delta).toBeCloseTo(5, 5);
   });
 
@@ -81,10 +81,63 @@ describe("short (5-hour) window", () => {
   });
 });
 
+describe("when a hold lifts", () => {
+  it("reports the moment the pace catches up, not the window's reset", () => {
+    const { store } = setup();
+    store.record("g1", claude(45, 40, 10, 50));
+    const c = cap(store);
+    // 45 % used, release at delta <= -2 -> elapsed must reach 47 %.
+    const expected = resetsFor(40, WEEK).getTime() - WEEK * 1000 * (1 - 0.47);
+    expect(c.heldUntil?.getTime()).toBeCloseTo(expected, -2);
+    expect(c.heldUntil!.getTime()).toBeLessThan(resetsFor(40, WEEK).getTime());
+  });
+
+  it("uses the reset for an exhausted window", () => {
+    const { store } = setup();
+    store.record("g1", claude(100, 50, 5, 50));
+    expect(cap(store).heldUntil?.getTime()).toBe(resetsFor(50, WEEK).getTime());
+  });
+
+  it("does not keep holding on a window that has already reset", () => {
+    const { store } = setup();
+    const o = claude(100, 99.9, 5, 50);
+    o.windows[1]!.resetsAt = new Date(now.getTime() - 1000);
+    store.record("g1", o);
+    expect(cap(store).available).toBe(true);
+  });
+});
+
+describe("partial observations", () => {
+  it("keeps windows an event does not mention", () => {
+    const { store } = setup();
+    store.record("g1", claude(45, 40, 10, 50));
+    const later = new Date(now.getTime() + 60_000);
+    store.record("g1", { observedAt: later, source: "run_output", windows: [claude(0, 0, 11, 50).windows[0]!] });
+    const c = store.getCapacity("g1", "anthropic", "subscription", later);
+    expect(c.windows.map((w) => w.id).sort()).toEqual(["five_hour", "seven_day"]);
+    expect(c.available).toBe(false); // the weekly hold survives
+  });
+
+  it("records history at most every few minutes", () => {
+    const { store } = setup();
+    for (let i = 0; i < 20; i += 1) store.record("g1", claude(10, 40, 10, 50, new Date(now.getTime() + i * 1000)));
+    expect(store.historyOf("g1")).toHaveLength(1);
+    store.record("g1", claude(10, 40, 10, 50, new Date(now.getTime() + 6 * 60_000)));
+    expect(store.historyOf("g1")).toHaveLength(2);
+  });
+
+  it("reports whether any account has accounting on", () => {
+    const { store, settingsStore } = setup({ ...on, enabled: false });
+    expect(store.anyEnabled()).toBe(false);
+    settingsStore.set("g2", on);
+    expect(store.anyEnabled()).toBe(true);
+  });
+});
+
 describe("exhaustion", () => {
   it("holds a full window even at the very end of it", () => {
     const { store } = setup();
-    store.record("g1", claude(100, 100, 5, 50));
+    store.record("g1", claude(100, 99, 5, 50));
     const c = cap(store);
     expect(c.available).toBe(false);
     expect(c.reason).toBe("window_exhausted");

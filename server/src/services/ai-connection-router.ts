@@ -206,7 +206,7 @@ export function aiConnectionRouterService(db: Db, workerManager?: PluginWorkerMa
     } finally { if (timer) clearTimeout(timer); }
   }
 
-  async function resolve(input: { companyId: string; poolId: string; agentId: string; userId: string | null; adapterType: string; taskKey: string; overrides?: Record<string, unknown>; existingGrantId?: string; requireExisting?: boolean; persisted?: AiConnectionRouterSelection }) {
+  async function resolve(input: { companyId: string; poolId: string; agentId: string; userId: string | null; adapterType: string; taskKey: string; overrides?: Record<string, unknown>; existingGrantId?: string; requireExisting?: boolean; persisted?: AiConnectionRouterSelection; ignoreAccountLimit?: boolean }) {
     const pinWhere = and(eq(aiConnectionTaskPins.companyId, input.companyId), eq(aiConnectionTaskPins.poolId, input.poolId), eq(aiConnectionTaskPins.agentId, input.agentId), eq(aiConnectionTaskPins.taskKey, input.taskKey));
     const validateSelection = async (selection: AiConnectionRouterSelection, client = db) => aiConnectionService(client).select({ companyId: input.companyId, agentId: input.agentId, userId: input.userId, adapterType: input.adapterType, binding: selection.binding, model: selection.runtimeConfig.model, runnerProvider: selection.runtimeConfig.provider, acpxAgent: selection.runtimeConfig.acpxAgent });
     if (input.persisted) {
@@ -248,10 +248,13 @@ export function aiConnectionRouterService(db: Db, workerManager?: PluginWorkerMa
         candidates.splice(0, candidates.length, existing);
       }
       // inferdyne fork: accounts that are ahead of their limit pace take no new work from the pool.
-      if (!pin && candidates.length > 0) {
+      // Setup checks (harness verification) are not work and ignore the limit.
+      if (!pin && !input.ignoreAccountLimit && candidates.length > 0) {
         const { open, retryAt } = filterByAccountLimit(candidates, (c) => c.member.binding, accountCapacity);
         if (open.length === 0) {
-          throw new AiConnectionPoolExhausted((retryAt ?? new Date(Date.now() + 5 * 60_000)).toISOString(), pool.id);
+          // Re-check soon: the limit state changes with every measurement, long before a window resets.
+          const soonest = Date.now() + 10 * 60_000;
+          throw new AiConnectionPoolExhausted(new Date(Math.min(retryAt?.getTime() ?? soonest, soonest)).toISOString(), pool.id);
         }
         candidates.splice(0, candidates.length, ...open);
       }

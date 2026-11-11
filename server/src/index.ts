@@ -1,6 +1,6 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
-import { accountCapacity, limitSettingsStore, listActiveUserMemberships, tickAccountLimits } from "./services/account-capacity/index.js";
+import { accountCapacity, limitSettingsStore, listActiveUserMemberships, listWaitingGrantIds, tickAccountLimits } from "./services/account-capacity/index.js";
 import { podMutexService } from "./services/pod-mutex.js";
 import { readDeployDrain } from "./services/deploy-drain.js";
 import { registerNativeRuntimeResponseDelivery } from "./services/native-runtime/native-runtime-response-delivery.js";
@@ -1350,15 +1350,22 @@ async function startServerWithDatabaseTeardown(
   server.on("close", () => { void taskDrainExpiryWork.stop(); });
   // inferdyne fork: per-account limit observations and gate (services/account-capacity).
   const accountLimitsUsage = aiConnectionService(db as any);
+  let accountLimitsTickRunning = false;
   const runAccountLimitsTick = () => {
-    if (heartbeatSchedulerStopped || isWarmStandby()) return;
-    trackHeartbeatSchedulerWork(limitSettingsStore.load(db as any).then(() => tickAccountLimits(accountCapacity, {
-      memberships: () => listActiveUserMemberships(db as any),
-      usage: accountLimitsUsage as any,
-      resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
-    })).catch(err => {
+    if (heartbeatSchedulerStopped || isWarmStandby() || accountLimitsTickRunning) return;
+    accountLimitsTickRunning = true;
+    trackHeartbeatSchedulerWork((async () => {
+      // A failed settings read keeps the cached settings; probing and resuming go on.
+      await limitSettingsStore.load(db as any).catch(err => logger.warn({ err }, "account limits: settings reload failed"));
+      await tickAccountLimits(accountCapacity, {
+        memberships: () => listActiveUserMemberships(db as any),
+        usage: accountLimitsUsage as any,
+        waitingGrantIds: () => listWaitingGrantIds(db as any),
+        resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
+      });
+    })().catch(err => {
       logger.error({ err }, "account limits tick failed");
-    }));
+    }).finally(() => { accountLimitsTickRunning = false; }));
   };
   const accountLimitsTimer = setInterval(runAccountLimitsTick, 120_000);
   // Settings and the first measurements should not wait two minutes after a restart.

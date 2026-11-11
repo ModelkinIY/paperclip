@@ -134,4 +134,26 @@ describe("SubscriptionLimit", () => {
     await settle();
     expect(refreshMock).toHaveBeenCalledWith("co-1", "g1");
   });
+
+  it("shows an error instead of the page only when there is no data at all", async () => {
+    listMock.mockRejectedValue(new Error("down"));
+    await mount();
+    await settle();
+    expect(container.textContent).toContain("down");
+    expect(container.querySelector('[data-testid="subscription-limit"]')).toBeNull();
+  });
+
+  it("does not carry typed values to another account", async () => {
+    listMock.mockResolvedValue([base({}), base({ grantId: "g2", accountName: "Claude second" })]);
+    await mount();
+    const params = () => container.querySelector('[data-testid="params-Weekly"]')!;
+    const hold = () => params().querySelectorAll("input")[0] as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setter.call(hold(), "7");
+    flushSync(() => hold().dispatchEvent(new Event("input", { bubbles: true })));
+    expect(hold().value).toBe("7");
+    const second = Array.from(container.querySelectorAll("nav button")).find((b) => b.textContent?.includes("Claude second"))!;
+    flushSync(() => (second as HTMLButtonElement).click());
+    expect(hold().value).toBe("0");
+  });
 });

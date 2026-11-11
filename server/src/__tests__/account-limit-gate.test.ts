@@ -116,10 +116,13 @@ describeDb("account limit gate", () => {
     }
   });
 
-  it("returns no candidates when the user is unknown or there is no AI binding", async () => {
+  it("falls back to the company's default user, and finds nothing without one or without an AI binding", async () => {
     const s = await seed("responsible_user");
     const run = await s.queuedRun();
-    expect(await resolveRunAccountCandidates(db, { ...run, responsibleUserId: null })).toEqual([]);
+    const noUser = { ...run, responsibleUserId: null };
+    expect((await resolveRunAccountCandidates(db, noUser)).map((c) => c.grantId)).toEqual([s.grantId]);
+    await db.update(companies).set({ defaultResponsibleUserId: null }).where(eq(companies.id, s.companyId));
+    expect(await resolveRunAccountCandidates(db, noUser)).toEqual([]);
     await db.update(agents).set({ runtimeConfig: {} }).where(eq(agents.id, s.agent.id));
     expect(await resolveRunAccountCandidates(db, run)).toEqual([]);
   });

@@ -11,11 +11,19 @@ export function isTerminalIssueStatus(status: string | null | undefined): status
   return TERMINAL_ISSUE_STATUSES.has(status as IssueStatus);
 }
 
+/**
+ * inferdyne fork: a queued run held by its AI account's limit pace is waiting,
+ * not live: nothing runs and nothing is streaming.
+ */
+export function isWaitingForAiLimit(run: Pick<LiveRunForIssue, "status" | "aiLimitWait">): boolean {
+  return run.status === "queued" && !!run.aiLimitWait;
+}
+
 export function isLiveIssueRun(
-  run: Pick<LiveRunForIssue, "status">,
+  run: Pick<LiveRunForIssue, "status" | "aiLimitWait">,
   issueStatus?: string | null,
 ): boolean {
-  return isLiveRunStatus(run.status) && !isTerminalIssueStatus(issueStatus);
+  return isLiveRunStatus(run.status) && !isWaitingForAiLimit(run) && !isTerminalIssueStatus(issueStatus);
 }
 
 export interface LiveIssueStatusNode {

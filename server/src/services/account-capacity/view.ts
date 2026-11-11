@@ -23,7 +23,8 @@ export async function listAccountLimitViews(
   const agentRows = await db.select({ id: agents.id, name: agents.name, runtimeConfig: agents.runtimeConfig })
     .from(agents).where(eq(agents.companyId, companyId));
   const queued = await db.select({
-    id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId, ctx: heartbeatRuns.contextSnapshot,
+    id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, issueId: heartbeatRuns.issueId,
+    wait: sql<{ grantId?: string; since?: string } | null>`${heartbeatRuns.contextSnapshot} -> 'aiLimitWait'`,
   }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.status, "queued"),
     sql`jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object' AND jsonb_exists(${heartbeatRuns.contextSnapshot}, 'aiLimitWait')`,
@@ -41,7 +42,7 @@ export async function listAccountLimitViews(
     const { provider, method } = meta.data;
     const settings = settingsStore.get(grant.id);
     const cap = store.getCapacity(grant.id, provider, method, now);
-    const waits = queued.filter((r) => (r.ctx as { aiLimitWait?: { grantId?: string } }).aiLimitWait?.grantId === grant.id);
+    const waits = queued.filter((r) => r.wait?.grantId === grant.id);
     views.push({
       grantId: grant.id, connectionId: connection.id, provider, method,
       accountName: connection.name, accountLabel: grant.providerTenant?.name ?? null,
@@ -71,7 +72,7 @@ export async function listAccountLimitViews(
       }),
       queuedRuns: waits.map((r) => ({
         id: r.id, agentId: r.agentId, issueId: r.issueId,
-        since: (r.ctx as { aiLimitWait?: { since?: string } }).aiLimitWait?.since ?? null,
+        since: r.wait?.since ?? null,
       })),
       paceModels: paceModelIds(),
     });

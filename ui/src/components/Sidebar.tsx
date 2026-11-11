@@ -1,4 +1,5 @@
 import { CoordinatorSidebar } from "./CoordinatorSidebar";
+import { isWaitingForAiLimit } from "../lib/liveIssueIds";
 import { useCoordinatorWorkspaceEnabled } from "@/hooks/useCoordinatorWorkspaceEnabled";
 import {
   Inbox,
@@ -96,9 +97,11 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
     refetchInterval: sharedLiveRuns.refetchInterval,
   });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
-  const liveRunCount = liveRuns?.length ?? 0;
+  // inferdyne fork: runs held by an AI account limit are waiting, not live.
+  const activeLiveRuns = (liveRuns ?? []).filter((run) => !isWaitingForAiLimit(run));
+  const liveRunCount = activeLiveRuns.length;
   const liveIssueIds = new Set(
-    (liveRuns ?? []).flatMap((run) => run.issueId ? [run.issueId] : []),
+    activeLiveRuns.flatMap((run) => run.issueId ? [run.issueId] : []),
   );
   // PAP-670 splits the nav reorganization across two experimental flags.
   // Agent Chat: Chat leads Work as one row with its own agent rail (the

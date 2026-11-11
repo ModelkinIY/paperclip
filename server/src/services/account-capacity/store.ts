@@ -5,10 +5,12 @@ import { DEFAULT_LIMIT_SETTINGS, type Capacity, type LimitSettings, type Observa
 
 export interface LimitSettingsStore {
   get(grantId: string): LimitSettings;
+  /** True when accounting is on for at least one grant (lets hot paths skip all work otherwise). */
+  anyEnabled(): boolean;
 }
 
 export class InMemoryLimitSettingsStore implements LimitSettingsStore {
-  private readonly map = new Map<string, LimitSettings>();
+  private map = new Map<string, LimitSettings>();
   get(grantId: string): LimitSettings {
     return this.map.get(grantId) ?? DEFAULT_LIMIT_SETTINGS;
   }
@@ -17,6 +19,14 @@ export class InMemoryLimitSettingsStore implements LimitSettingsStore {
   }
   clear() {
     this.map.clear();
+  }
+  /** Swap the whole content at once, so readers never see a half-loaded table. */
+  replaceAll(entries: Map<string, LimitSettings>) {
+    this.map = entries;
+  }
+  anyEnabled(): boolean {
+    for (const v of this.map.values()) if (v.enabled) return true;
+    return false;
   }
 }
 
@@ -27,6 +37,10 @@ interface Entry {
 }
 
 const HISTORY_LIMIT = 200;
+/** One history point per this long; events can arrive many times a minute. */
+const HISTORY_MIN_GAP_MS = 5 * 60_000;
+/** Observations closer than this are parts of one picture. */
+const MERGE_WITHIN_MS = 30 * 60_000;
 
 /** Latest observation per grant plus the hysteresis state. */
 export class AccountCapacityStore {
@@ -34,14 +48,33 @@ export class AccountCapacityStore {
 
   constructor(private readonly settings: LimitSettingsStore) {}
 
-  /** The newest observation wins; an older one never replaces it. */
+  /**
+   * The newest observation wins; an older one never replaces it. A partial
+   * observation (an event that carries only one window) keeps the windows it
+   * does not mention from the previous, still fresh, observation.
+   */
   record(grantId: string, observation: Observation) {
     const entry = this.entries.get(grantId);
     if (entry && entry.observation.observedAt.getTime() > observation.observedAt.getTime()) return;
+    let merged = observation;
+    if (entry && observation.observedAt.getTime() - entry.observation.observedAt.getTime() < MERGE_WITHIN_MS) {
+      const key = (w: { id: string; scope: string | null }) => `${w.id}\u0000${w.scope ?? ""}`;
+      const seen = new Set(observation.windows.map(key));
+      const carried = entry.observation.windows.filter((w) => !seen.has(key(w)) && (!w.resetsAt || w.resetsAt > observation.observedAt));
+      if (carried.length > 0) merged = { ...observation, windows: [...observation.windows, ...carried] };
+    }
     const history = entry?.history ?? [];
-    history.push({ at: observation.observedAt, windows: observation.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent })) });
-    if (history.length > HISTORY_LIMIT) history.splice(0, history.length - HISTORY_LIMIT);
-    this.entries.set(grantId, { observation, held: entry?.held ?? {}, history });
+    const last = history[history.length - 1];
+    if (!last || observation.observedAt.getTime() - last.at.getTime() >= HISTORY_MIN_GAP_MS) {
+      history.push({ at: observation.observedAt, windows: merged.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent })) });
+      if (history.length > HISTORY_LIMIT) history.splice(0, history.length - HISTORY_LIMIT);
+    }
+    this.entries.set(grantId, { observation: merged, held: entry?.held ?? {}, history });
+  }
+
+  /** Cheap check for hot paths: no account has accounting on. */
+  anyEnabled(): boolean {
+    return this.settings.anyEnabled();
   }
 
   observationOf(grantId: string): Observation | null {
@@ -68,7 +101,8 @@ export class AccountCapacityStore {
     }
     const stale = !entry || now.getTime() - entry.observation.observedAt.getTime() > settings.maxStaleMinutes * 60_000;
     if (!entry || stale) {
-      // Unknown must never stop work.
+      // Unknown must never stop work; the next reading starts without an old hold.
+      if (entry) entry.held = {};
       return {
         ...base, available: true, headroom: null, reason: settings.enabled ? "stale_unknown" : "gate_disabled",
         windows: [], observedAt: entry?.observation.observedAt ?? null, source: entry?.observation.source ?? null, heldUntil: null,

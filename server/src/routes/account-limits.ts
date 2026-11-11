@@ -5,6 +5,7 @@ import { accountLimitParamsSchema, accountLimitSettingsPatchSchema, aiConnection
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { validate } from "../middleware/validate.js";
 import { badRequest, notFound } from "../errors.js";
+import { paceModelIds } from "../services/account-capacity/pace/index.js";
 import { logActivity } from "../services/activity-log.js";
 import { accountCapacity, limitSettingsStore } from "../services/account-capacity/runtime.js";
 import { probeGrant, type AccountProbeUsage } from "../services/account-capacity/probe.js";
@@ -15,11 +16,14 @@ import { listAccountLimitViews } from "../services/account-capacity/view.js";
  * board only. Read the state, switch accounting on or off, tune the pace
  * model, and take a fresh measurement.
  */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export function accountLimitsRoutes(db: Db, deps: { usage: AccountProbeUsage; resumeQueuedRuns?: () => Promise<unknown> }) {
   const router = Router();
 
   function guard(req: Request) {
     const companyId = req.params.companyId as string;
+    if (!UUID.test(companyId)) throw badRequest("companyId must be a UUID");
     assertBoard(req);
     assertCompanyAccess(req, companyId);
     return companyId;
@@ -49,6 +53,9 @@ export function accountLimitsRoutes(db: Db, deps: { usage: AccountProbeUsage; re
     const companyId = guard(req);
     const grantId = grantParam(req);
     await account(companyId, grantId);
+    if (req.body.paceModel !== undefined && !paceModelIds().includes(req.body.paceModel)) {
+      throw badRequest(`Unknown pace model; available: ${paceModelIds().join(", ")}`);
+    }
     const before = limitSettingsStore.get(grantId);
     const actor = getActorInfo(req);
     const next = await limitSettingsStore.update(db, companyId, grantId, req.body, actor.actorId);
@@ -68,11 +75,15 @@ export function accountLimitsRoutes(db: Db, deps: { usage: AccountProbeUsage; re
     const grantId = grantParam(req);
     const { row, meta } = await account(companyId, grantId);
     const actor = getActorInfo(req);
-    const ran = await probeGrant(accountCapacity, deps.usage, {
+    const outcome = await probeGrant(accountCapacity, deps.usage, {
       companyId, grantId, connectionId: row.connection.id, provider: meta.provider, method: meta.method, userId: actor.actorId,
     }, new Date(), true);
     res.setHeader("Cache-Control", "no-store");
-    res.json({ probed: ran, capacity: accountCapacity.getCapacity(grantId, meta.provider, meta.method) });
+    res.json({
+      probed: outcome === "ok",
+      ...(outcome === "failed" ? { error: "The provider did not return limits. Check that the account is connected and you may use it." } : {}),
+      capacity: accountCapacity.getCapacity(grantId, meta.provider, meta.method),
+    });
   });
 
   return router;
