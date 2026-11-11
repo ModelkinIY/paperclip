@@ -1,6 +1,7 @@
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
 import { tickWeeklyPace } from "./services/weekly-pace.js";
+import { accountCapacity, listActiveUserMemberships, tickAccountLimits } from "./services/account-capacity/index.js";
 import { podMutexService } from "./services/pod-mutex.js";
 import { readDeployDrain } from "./services/deploy-drain.js";
 import { registerNativeRuntimeResponseDelivery } from "./services/native-runtime/native-runtime-response-delivery.js";
@@ -1360,6 +1361,18 @@ async function startServerWithDatabaseTeardown(
     }));
   }, 120_000);
   weeklyPaceTimer.unref?.();
+  // inferdyne fork: per-account limit observations (services/account-capacity).
+  const accountLimitsTimer = setInterval(() => {
+    if (heartbeatSchedulerStopped || isWarmStandby()) return;
+    trackHeartbeatSchedulerWork(tickAccountLimits(accountCapacity, {
+      memberships: () => listActiveUserMemberships(db as any),
+      usage: weeklyPaceUsage as any,
+      resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
+    }).catch(err => {
+      logger.error({ err }, "account limits tick failed");
+    }));
+  }, 120_000);
+  accountLimitsTimer.unref?.();
   // inferdyne fork: resume queues once a deploy drain is lifted (services/deploy-drain.ts).
   let deployDrainWasActive = readDeployDrain().active;
   const deployDrainTimer = setInterval(() => {
@@ -1389,7 +1402,7 @@ async function startServerWithDatabaseTeardown(
   podMutexTimer.unref?.();
   server.on("close", () => clearInterval(podMutexTimer));
   server.on("close", () => clearInterval(deployDrainTimer));
-  server.on("close", () => clearInterval(weeklyPaceTimer));
+  server.on("close", () => { clearInterval(weeklyPaceTimer); clearInterval(accountLimitsTimer); });
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
   if (runEvidenceMigrationWork) trackHeartbeatSchedulerWork(runEvidenceMigrationWork.ready);

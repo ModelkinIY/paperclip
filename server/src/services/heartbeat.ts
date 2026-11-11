@@ -3136,6 +3136,10 @@ export function heartbeatService(
         appendRunEvent, getCurrentUserRedactionOptions,
         assertWriterAuthority: createRunLogWriterAuthority(db, run, runOptions.nativeLeaseOwner),
         runtimeLogSecretValues: observabilitySecretValues(observability),
+        resolveAiGrantId: () => {
+          const grantId = (context.aiConnection as { grantId?: unknown } | undefined)?.grantId;
+          return typeof grantId === "string" ? grantId : null;
+        },
       });
       const goalCheckpointSession: {
         current: {
