@@ -280,7 +280,7 @@ describe("App Activity routing (PAP-16302)", () => {
 
   it.each([true, false])("serves all Audit tab destinations with Streamlined UI set to %s", async (enabled) => {
     streamlinedUiState.enabled = enabled;
-    for (const section of ["runs", "costs", "budgets", "timeline", "commentary"]) {
+    for (const section of ["runs", "costs", "budgets", "subscription-limit", "timeline", "commentary"]) {
       const path = `/PAP/activity/${section}?agentId=agent-1`;
       const root = renderAppAt(container, path);
       await waitForRoute(container, `AUDIT_${section.toUpperCase()}@${path}`);

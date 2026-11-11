@@ -8,6 +8,7 @@ import { useCompany } from "@/context/CompanyContext";
 import { useNavigate, useSearchParams } from "@/lib/router";
 import { Costs } from "@/pages/Costs";
 import { Timeline } from "@/pages/Timeline";
+import { SubscriptionLimit } from "./SubscriptionLimit";
 import { AuditFeed, type AuditFeedMode } from "./AuditFeed";
 import { AuditRuns } from "./AuditRuns";
 import { AgentCommentary } from "./AgentCommentary";
@@ -157,6 +158,8 @@ export function AuditHub({ section }: { section: AuditSection }) {
         <AuditRuns companyId={selectedCompanyId} routineId={routineId} />
       ) : section === "budgets" ? (
         <Costs embedded initialTab="budgets" lockTab />
+      ) : section === "subscription-limit" ? (
+        <SubscriptionLimit companyId={selectedCompanyId} />
       ) : section === "timeline" ? (
         <Timeline embedded />
       ) : (

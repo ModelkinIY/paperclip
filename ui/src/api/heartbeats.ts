@@ -1,4 +1,4 @@
-import type { AgentAppearance } from "@paperclipai/shared";
+import type { AgentAppearance, AiLimitRunWait } from "@paperclipai/shared";
 import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT } from "@paperclipai/shared";
 import type { IssueRecoveryAction } from "@paperclipai/shared";
 import type {
@@ -77,6 +77,8 @@ export interface LiveRunForIssue {
   lastOutputBytes?: number | null;
   issueId?: string | null;
   livenessState?: RunLivenessFields["livenessState"];
+  /** inferdyne fork: set while a queued run waits for its AI account to get under its limit pace. */
+  aiLimitWait?: AiLimitRunWait | null;
   livenessReason?: string | null;
   continuationAttempt?: number;
   lastUsefulActionAt?: string | null;

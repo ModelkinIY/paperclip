@@ -1,6 +1,6 @@
 import { useSelectedHeartbeatRun } from "../hooks/useSelectedHeartbeatRun";
 import { AgentCharacter } from "../components/AgentCharacter";
-import { characterStateForAgent, podMutexWaitLabel, readPodMutexRunWait } from "@paperclipai/shared";
+import { aiLimitWaitLabel, characterStateForAgent, podMutexWaitLabel, readAiLimitRunWait, readPodMutexRunWait } from "@paperclipai/shared";
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useNavigate, useLocation, Link, Navigate, useBeforeUnload, type NavigateFunction } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
@@ -1122,6 +1122,13 @@ export function runPodMutexWaitText(run: Pick<HeartbeatRun, "status" | "contextS
   return wait ? `queued — ${podMutexWaitLabel(wait)}` : null;
 }
 
+/** inferdyne fork: "queued — waiting for Claude main limit" for a run held by its AI account's limit pace. */
+export function runAiLimitWaitText(run: Pick<HeartbeatRun, "status" | "contextSnapshot">): string | null {
+  if (run.status !== "queued") return null;
+  const wait = readAiLimitRunWait(run.contextSnapshot);
+  return wait ? `queued — ${aiLimitWaitLabel(wait)}` : null;
+}
+
 export type LatestRunIssue = { id: string; title: string; status: string; identifier?: string | null };
 
 /**
@@ -1268,6 +1275,9 @@ function LatestRunCard({
           <StatusBadge status={run.status} />
           {runPodMutexWaitText(run) ? (
             <span className="truncate text-xs text-amber-700 dark:text-amber-300" data-slot="run-pod-mutex-wait">{runPodMutexWaitText(run)}</span>
+          ) : null}
+          {runAiLimitWaitText(run) ? (
+            <span className="truncate text-xs text-amber-700 dark:text-amber-300" data-slot="run-ai-limit-wait">{runAiLimitWaitText(run)}</span>
           ) : null}
           {task ? (
             <>
@@ -2679,6 +2689,11 @@ function RunListItem({ run, isSelected, agentId }: { run: HeartbeatRun; isSelect
       {runPodMutexWaitText(run) ? (
         <span className="text-xs text-(--status-task-icon-todo) truncate pl-5.5" data-slot="run-pod-mutex-wait">
           {runPodMutexWaitText(run)}
+        </span>
+      ) : null}
+      {runAiLimitWaitText(run) ? (
+        <span className="text-xs text-(--status-task-icon-todo) truncate pl-5.5" data-slot="run-ai-limit-wait">
+          {runAiLimitWaitText(run)}
         </span>
       ) : null}
       {summary && (

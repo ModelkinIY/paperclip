@@ -381,6 +381,7 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="activity/runs" element={<AuditHub section="runs" />} />
       <Route path="activity/costs" element={<AuditHub section="costs" />} />
       <Route path="activity/budgets" element={<AuditHub section="budgets" />} />
+      <Route path="activity/subscription-limit" element={<AuditHub section="subscription-limit" />} />
       <Route path="activity/timeline" element={<AuditHub section="timeline" />} />
       {streamlinedUiEnabled ? (
         <>

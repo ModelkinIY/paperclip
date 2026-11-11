@@ -1,3 +1,4 @@
+import { aiLimitWaitLabel } from "@paperclipai/shared";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { useMemo, useState } from "react";
 import { Link } from "@/lib/router";
@@ -124,6 +125,11 @@ export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
                       {run.id.slice(0, 8)}
                     </Link>
                     <StatusBadge status={run.status} />
+                    {run.status === "queued" && run.aiLimitWait ? (
+                      <span className="text-amber-700 dark:text-amber-300" data-slot="run-ai-limit-wait">
+                        {aiLimitWaitLabel(run.aiLimitWait)}
+                      </span>
+                    ) : null}
                     <span>{formatDateTime(run.startedAt ?? run.createdAt)}</span>
                   </div>
                 </div>

@@ -24,3 +24,10 @@ export function readAiLimitRunWait(contextSnapshot: unknown): AiLimitRunWait | n
     since: typeof r.since === "string" ? r.since : "",
   };
 }
+
+/** "waiting for Claude main limit (until 2026-11-14 09:00)" for a run held by its AI account's limit pace. */
+export function aiLimitWaitLabel(wait: AiLimitRunWait): string {
+  const who = wait.accountName ?? wait.provider ?? "AI account";
+  const until = wait.heldUntil ? ` (window resets ${wait.heldUntil.replace("T", " ").slice(0, 16)} UTC)` : "";
+  return `waiting for ${who} limit${until}`;
+}

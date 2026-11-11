@@ -256,12 +256,26 @@ export function Agents() {
     const map = new Map<string, { runId: string; liveCount: number }>();
     for (const r of runs ?? []) {
       if (r.status !== "running" && r.status !== "queued") continue;
+      // inferdyne fork: a queued run held by its AI account's limit pace is waiting, not live.
+      if (r.status === "queued" && r.aiLimitWait) continue;
       const existing = map.get(r.agentId);
       if (existing) {
         existing.liveCount += 1;
         continue;
       }
       map.set(r.agentId, { runId: r.id, liveCount: 1 });
+    }
+    return map;
+  }, [runs]);
+
+  // inferdyne fork: queued runs waiting for an AI account limit, per agent.
+  const limitWaitByAgent = useMemo(() => {
+    const map = new Map<string, { runId: string; count: number }>();
+    for (const r of runs ?? []) {
+      if (r.status !== "queued" || !r.aiLimitWait) continue;
+      const existing = map.get(r.agentId);
+      if (existing) existing.count += 1;
+      else map.set(r.agentId, { runId: r.id, count: 1 });
     }
     return map;
   }, [runs]);
@@ -393,6 +407,13 @@ export function Agents() {
                   liveCount={liveRunByAgent.get(agent.id)!.liveCount}
                 />
               )}
+              {limitWaitByAgent.has(agent.id) && (
+                <LimitWaitIndicator
+                  agentRef={agentRouteRef(agent)}
+                  runId={limitWaitByAgent.get(agent.id)!.runId}
+                  count={limitWaitByAgent.get(agent.id)!.count}
+                />
+              )}
               <span className="w-20 flex justify-end">
                 <AgentStatusBadge status={agent.status} />
               </span>
@@ -477,6 +498,7 @@ export function Agents() {
               depth={0}
               agentMap={agentMap}
               liveRunByAgent={liveRunByAgent}
+              limitWaitByAgent={limitWaitByAgent}
               environmentByAgentId={environmentByAgentId}
               environmentDataLoading={environmentDataLoading}
               showEnvironment={showEnvironmentColumn}
@@ -519,6 +541,7 @@ function OrgTreeNode({
   depth,
   agentMap,
   liveRunByAgent,
+  limitWaitByAgent,
   environmentByAgentId,
   environmentDataLoading,
   showEnvironment,
@@ -529,6 +552,7 @@ function OrgTreeNode({
   depth: number;
   agentMap: Map<string, Agent>;
   liveRunByAgent: Map<string, { runId: string; liveCount: number }>;
+  limitWaitByAgent: Map<string, { runId: string; count: number }>;
   environmentByAgentId: Map<string, EnvironmentDescriptor>;
   environmentDataLoading: boolean;
   showEnvironment: boolean;
@@ -600,6 +624,13 @@ function OrgTreeNode({
                 liveCount={liveRunByAgent.get(node.id)!.liveCount}
               />
             )}
+              {limitWaitByAgent.has(node.id) && (
+                <LimitWaitIndicator
+                  agentRef={agent ? agentRouteRef(agent) : node.id}
+                  runId={limitWaitByAgent.get(node.id)!.runId}
+                  count={limitWaitByAgent.get(node.id)!.count}
+                />
+              )}
             {agent && (
               <div className="hidden xl:flex items-center gap-3">
                 <AgentMetaColumns
@@ -628,6 +659,7 @@ function OrgTreeNode({
               depth={depth + 1}
               agentMap={agentMap}
               liveRunByAgent={liveRunByAgent}
+              limitWaitByAgent={limitWaitByAgent}
               environmentByAgentId={environmentByAgentId}
               environmentDataLoading={environmentDataLoading}
               showEnvironment={showEnvironment}
@@ -686,6 +718,24 @@ function AgentMetaColumns({
         {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
       </span>
     </>
+  );
+}
+
+/** inferdyne fork: not "live" — the agent's runs are queued behind its AI account's limit pace. */
+function LimitWaitIndicator({ agentRef, runId, count }: { agentRef: string; runId: string; count: number }) {
+  return (
+    <Link
+      to={`/agents/${agentRef}/runs/${runId}`}
+      className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 transition-colors no-underline"
+      onClick={(e) => e.stopPropagation()}
+      data-slot="limit-wait-indicator"
+      title="Queued: the AI account is ahead of its limit pace"
+    >
+      <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500" />
+      <span className="text-(length:--text-micro) font-medium text-amber-700 dark:text-amber-300">
+        Waiting for limit{count > 1 ? ` (${count})` : ""}
+      </span>
+    </Link>
   );
 }
 

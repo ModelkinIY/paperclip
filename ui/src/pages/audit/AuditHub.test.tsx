@@ -70,6 +70,12 @@ vi.mock("@/pages/Costs", () => ({
   ),
 }));
 
+vi.mock("./SubscriptionLimit", () => ({
+  SubscriptionLimit: ({ companyId }: { companyId: string }) => (
+    <div data-testid="subscription-limit" data-company={companyId} />
+  ),
+}));
+
 vi.mock("@/pages/Timeline", () => ({
   Timeline: ({ embedded }: { embedded?: boolean }) => (
     <div data-testid="audit-timeline" data-embedded={String(embedded ?? false)} />
@@ -95,7 +101,7 @@ describe("AuditHub", () => {
     vi.clearAllMocks();
   });
 
-  function render(section: "activity" | "runs" | "costs" | "budgets" | "timeline" | "commentary") {
+  function render(section: "activity" | "runs" | "costs" | "budgets" | "subscription-limit" | "timeline" | "commentary") {
     root = createRoot(container);
     flushSync(() => root.render(<AuditHub section={section} />));
   }
@@ -104,12 +110,13 @@ describe("AuditHub", () => {
     currentSearch = "mode=agents&agentId=agent-1&runId=run-1&action=tool_";
     render("activity");
 
-    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(6);
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(7);
     expect(container.textContent).toContain("Activity");
     expect(container.textContent).toContain("Runs");
     expect(container.textContent).toContain("Commentary");
     expect(container.textContent).toContain("Costs");
     expect(container.textContent).toContain("Budgets");
+    expect(container.textContent).toContain("Subscription limit");
     expect(container.textContent).toContain("Timeline");
     const feed = container.querySelector<HTMLElement>('[data-testid="audit-feed"]');
     expect(feed?.dataset.mode).toBe("agents");
@@ -189,9 +196,20 @@ describe("AuditHub", () => {
 
     const labels = Array.from(container.querySelectorAll<HTMLElement>('[role="tab"]'))
       .map((tab) => tab.textContent?.trim());
-    expect(labels).toEqual(["Activity", "Runs", "Commentary", "Costs", "Budgets", "Timeline"]);
+    expect(labels).toEqual(["Activity", "Runs", "Commentary", "Costs", "Budgets", "Subscription limit", "Timeline"]);
     expect(container.querySelector<HTMLElement>('[data-testid="audit-timeline"]')?.dataset.embedded)
       .toBe("true");
+  });
+
+  it("renders Subscription limit for the selected company as its own section", () => {
+    render("subscription-limit");
+    expect(container.querySelector<HTMLElement>('[data-testid="subscription-limit"]')?.dataset.company).toBe("company-1");
+    const tab = Array.from(container.querySelectorAll<HTMLElement>('[role="tab"]'))
+      .find((item) => item.textContent?.trim() === "Subscription limit");
+    expect(tab?.getAttribute("aria-selected")).toBe("true");
+    expect(setBreadcrumbsMock).toHaveBeenCalledWith([
+      { label: "Audit", href: "/activity" }, { label: "Subscription limit" },
+    ]);
   });
 
   it("renders Costs and Budgets as intentional peer sections", () => {
