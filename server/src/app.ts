@@ -149,6 +149,8 @@ import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { announcementRoutes } from "./routes/announcements.js";
 import { deployDrainRoutes } from "./routes/deploy-drain.js";
 import { podMutexRoutes } from "./routes/pod-mutex.js";
+import { accountLimitsRoutes } from "./routes/account-limits.js";
+import { aiConnectionService } from "./services/ai-connections.js";
 import { serverVersion } from "./version.js";
 import { workspacePreferenceRoutes } from "./routes/workspace-preferences.js";
 import { primaryAgentRoutes } from "./routes/primary-agent.js";
@@ -838,6 +840,10 @@ export async function createApp(
   api.use(podMutexRoutes(db as any, {
     wakeup: (agentId, wakeOpts) => connectionIntentHeartbeat.wakeup(agentId, wakeOpts as any),
     resumeQueuedRuns: (scope) => connectionIntentHeartbeat.resumeQueuedRunsAfterDrain(scope),
+  }));
+  api.use(accountLimitsRoutes(db as any, {
+    usage: aiConnectionService(db as any) as any,
+    resumeQueuedRuns: () => connectionIntentHeartbeat.resumeQueuedRunsAfterDrain(),
   }));
   api.use(resourceMembershipRoutes(db));
   api.use(primaryAgentRoutes(db));

@@ -58,6 +58,7 @@ const apiPrefixes: Record<string, string> = {
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",
   "pod-mutex.ts": "/api",
+  "account-limits.ts": "/api",
   "decision-training.ts": "/api",
   "environments.ts": "/api",
   "execution-workspaces.ts": "/api",

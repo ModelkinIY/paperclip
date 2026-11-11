@@ -1,7 +1,7 @@
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
-import { ATTENTION_SOURCE_KINDS, podMutexUpsertSchema } from "@paperclipai/shared";
+import { ATTENTION_SOURCE_KINDS, accountLimitSettingsPatchSchema, podMutexUpsertSchema } from "@paperclipai/shared";
 import { agentCaseHandoffSchema, caseWorkflowDocumentTextSchema, doneCaseHandoffSchema, createWorkflowSchema, updateWorkflowSchema, listWorkflowsSchema, readWorkflowQuerySchema } from "@paperclipai/shared";
 import {
   experimentalApiPaths,
@@ -5015,6 +5015,37 @@ registry.registerPath({
   summary: "Force-release a pod mutex lease",
   request: { params: z.object({ companyId: z.string(), labelId: z.string().uuid() }) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
+// inferdyne fork: subscription-limit accounting per AI account (grant), board only.
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/account-limits",
+  tags: ["costs"],
+  summary: "AI accounts with limit windows, pace verdicts, settings and held runs",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/account-limits/{grantId}",
+  tags: ["costs"],
+  summary: "Switch limit accounting for an AI account or tune its pace model",
+  request: {
+    params: z.object({ companyId: z.string(), grantId: z.string().uuid() }),
+    body: jsonBody(accountLimitSettingsPatchSchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/account-limits/{grantId}/refresh",
+  tags: ["costs"],
+  summary: "Take a fresh limit measurement for an AI account",
+  request: { params: z.object({ companyId: z.string(), grantId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({

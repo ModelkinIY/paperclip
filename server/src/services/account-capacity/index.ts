@@ -5,6 +5,7 @@ export { observationFromRateLimitEvent, observationFromUsageLimits } from "./nor
 export { policyFor, type LimitPolicy } from "./policies/index.js";
 export { getPaceModel, registerPaceModel, paceModelIds, type PaceModel } from "./pace/index.js";
 export { createAccountRateLimitScanner } from "./scanner.js";
-export { accountCapacity, limitSettingsStore } from "./runtime.js";
+export { accountCapacity, limitSettingsStore, resetAccountCapacityForTests } from "./runtime.js";
 export { tickAccountLimits, probeGrant, discoverTrackedGrants, listActiveUserMemberships, type AccountProbeUsage, type TrackedGrant } from "./probe.js";
 export { createAccountLimitGate, resolveRunAccountCandidates, type AccountCandidate } from "./gate.js";
+export { DbLimitSettingsStore } from "./settings-db.js";

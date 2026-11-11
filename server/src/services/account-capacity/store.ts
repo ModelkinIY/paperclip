@@ -15,6 +15,9 @@ export class InMemoryLimitSettingsStore implements LimitSettingsStore {
   set(grantId: string, settings: LimitSettings) {
     this.map.set(grantId, settings);
   }
+  clear() {
+    this.map.clear();
+  }
 }
 
 interface Entry {
