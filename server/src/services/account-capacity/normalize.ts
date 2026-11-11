@@ -49,7 +49,7 @@ export function observationFromRateLimitEvent(event: unknown, observedAt: Date):
     const w = (raw as Record<string, unknown>)[key];
     if (!w || typeof w !== "object") continue;
     const { utilization, resetsAt } = w as Record<string, unknown>;
-    if (typeof utilization !== "number" || !Number.isFinite(utilization) || utilization < 0) continue;
+    if (typeof utilization !== "number" || !Number.isFinite(utilization) || utilization < 0 || utilization > 1.5) continue; // not a fraction: units unverified, fail open
     const reset = typeof resetsAt === "number" && Number.isFinite(resetsAt) && resetsAt > 0 ? new Date(resetsAt * 1000) : null;
     windows.push({ id: key, label, scope: null, usedPercent: utilization * 100, resetsAt: reset, durationSeconds: duration, limitReached: null });
   }

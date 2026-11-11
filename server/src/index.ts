@@ -1354,7 +1354,10 @@ async function startServerWithDatabaseTeardown(
   const runAccountLimitsTick = () => {
     if (heartbeatSchedulerStopped || isWarmStandby() || accountLimitsTickRunning) return;
     accountLimitsTickRunning = true;
-    trackHeartbeatSchedulerWork((async () => {
+    let tickTimer: ReturnType<typeof setTimeout> | undefined;
+    // A hung provider call must not freeze the feature: the tick is abandoned after five minutes.
+    const tickDeadline = new Promise<never>((_, reject) => { tickTimer = setTimeout(() => reject(new Error("account limits tick timed out")), 300_000); });
+    trackHeartbeatSchedulerWork(Promise.race([tickDeadline, (async () => {
       // A failed settings read keeps the cached settings; probing and resuming go on.
       await limitSettingsStore.load(db as any).catch(err => logger.warn({ err }, "account limits: settings reload failed"));
       await tickAccountLimits(accountCapacity, {
@@ -1363,9 +1366,9 @@ async function startServerWithDatabaseTeardown(
         waitingGrantIds: () => listWaitingGrantIds(db as any),
         resumeQueuedRuns: () => accountingHeartbeat.resumeQueuedRunsAfterDrain(),
       });
-    })().catch(err => {
+    })()]).catch(err => {
       logger.error({ err }, "account limits tick failed");
-    }).finally(() => { accountLimitsTickRunning = false; }));
+    }).finally(() => { clearTimeout(tickTimer); accountLimitsTickRunning = false; }));
   };
   const accountLimitsTimer = setInterval(runAccountLimitsTick, 120_000);
   // Settings and the first measurements should not wait two minutes after a restart.

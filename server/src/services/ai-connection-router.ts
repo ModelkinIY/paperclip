@@ -249,14 +249,19 @@ export function aiConnectionRouterService(db: Db, workerManager?: PluginWorkerMa
       }
       // inferdyne fork: accounts that are ahead of their limit pace take no new work from the pool.
       // Setup checks (harness verification) are not work and ignore the limit.
-      if (!pin && !input.ignoreAccountLimit && candidates.length > 0) {
-        const { open, retryAt } = filterByAccountLimit(candidates, (c) => c.member.binding, accountCapacity);
-        if (open.length === 0) {
-          // Re-check soon: the limit state changes with every measurement, long before a window resets.
-          const soonest = Date.now() + 10 * 60_000;
-          throw new AiConnectionPoolExhausted(new Date(Math.min(retryAt?.getTime() ?? soonest, soonest)).toISOString(), pool.id);
+      // A task session already bound to its account continues there: runs in progress are never held.
+      if (!pin && !input.ignoreAccountLimit && !input.requireExisting && candidates.length > 0) {
+        let filtered: ReturnType<typeof filterByAccountLimit<(typeof candidates)[number]>> | null = null;
+        try { filtered = filterByAccountLimit(candidates, (c) => c.member.binding, accountCapacity); } catch { /* fail open */ }
+        if (filtered) {
+          const { open, retryAt } = filtered;
+          if (open.length === 0) {
+            // Re-check soon: the limit state changes with every measurement, long before a window resets.
+            const soonest = Date.now() + 10 * 60_000;
+            throw new AiConnectionPoolExhausted(new Date(Math.min(retryAt?.getTime() ?? soonest, soonest)).toISOString(), pool.id);
+          }
+          candidates.splice(0, candidates.length, ...open);
         }
-        candidates.splice(0, candidates.length, ...open);
       }
       if (pool.mode === "usage_aware" && input.userId) {
         // At most four provider calls at once; the shared deadline bounds the whole pool.
