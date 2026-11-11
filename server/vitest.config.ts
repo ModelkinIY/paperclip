@@ -21,6 +21,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
+    // Persist transformed modules between vitest processes. With isolate: true
+    // every file re-imports the huge route/service graph; measured on
+    // issues-service.test.ts, transform+import fell from ~165s to ~13s on a
+    // warm cache. Stored in node_modules/.vitest-cache, so it is invalidated
+    // together with dependencies. PAPERCLIP_TEST_FS_MODULE_CACHE=0 disables it.
+    fsModuleCache: process.env.PAPERCLIP_TEST_FS_MODULE_CACHE !== "0",
     include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"],
     // Each server suite boots + tears down its own embedded Postgres in
     // beforeAll/afterAll. Under the loaded serial shard (maxWorkers=1) the

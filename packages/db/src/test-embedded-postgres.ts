@@ -34,6 +34,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  postgresFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => TestPostgresInstance;
@@ -120,6 +121,14 @@ async function getAvailablePort(): Promise<number> {
 const EMBEDDED_POSTGRES_USER = "paperclip";
 const EMBEDDED_POSTGRES_PASSWORD = "paperclip";
 const EMBEDDED_POSTGRES_INITDB_FLAGS = ["--encoding=UTF8", "--locale=C", "--lc-messages=C"];
+// The cluster is throwaway: it is deleted after the suite, so crash safety buys
+// nothing, while every commit would otherwise wait for an fsync. These flags are
+// runtime-only and do not change the template cluster's contents or key.
+// PAPERCLIP_TEST_POSTGRES_DURABLE=1 restores the default durable settings.
+const EMBEDDED_POSTGRES_FAST_FLAGS = ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"];
+function embeddedPostgresRuntimeFlags(): string[] {
+  return process.env.PAPERCLIP_TEST_POSTGRES_DURABLE === "1" ? [] : EMBEDDED_POSTGRES_FAST_FLAGS;
+}
 
 async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), tempDirPrefix));
@@ -149,6 +158,7 @@ async function createEmbeddedPostgresTestInstanceAt(dataDir: string) {
     port,
     persistent: true,
     initdbFlags: EMBEDDED_POSTGRES_INITDB_FLAGS,
+    postgresFlags: embeddedPostgresRuntimeFlags(),
     onLog: (message) => logBuffer.append(message),
     onError: (message) => logBuffer.append(message),
   }), dataDir);
