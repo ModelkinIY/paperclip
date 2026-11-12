@@ -46,6 +46,11 @@ export interface LimitSettings {
   fiveHour: PaceParams;
   /** Observations older than this are treated as unknown (fail-open). */
   maxStaleMinutes: number;
+  /**
+   * Placeholder for the cache-aware soft-limit policy (separate task):
+   * "off" = a task at a soft limit always waits on its slot.
+   */
+  cacheKeepaliveMode: string;
 }
 
 export const DEFAULT_LIMIT_SETTINGS: LimitSettings = {
@@ -54,6 +59,7 @@ export const DEFAULT_LIMIT_SETTINGS: LimitSettings = {
   weekly: { holdAbove: 0, releaseAtOrBelow: -2 },
   fiveHour: { holdAbove: 0, releaseAtOrBelow: -2 },
   maxStaleMinutes: 180,
+  cacheKeepaliveMode: "off",
 };
 
 export type CapacityReason =

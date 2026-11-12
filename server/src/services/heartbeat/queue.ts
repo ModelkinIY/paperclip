@@ -20,7 +20,9 @@ import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
-import { accountCapacity, createAccountLimitGate } from "../account-capacity/index.js";
+import { accountCapacity, createAccountLimitGate, limitSettingsStore } from "../account-capacity/index.js";
+import { createInferenceSlotGate, overlayAgentWithSlot, type ResolvedSlot } from "../inference-slots/service.js";
+import { deriveTaskKey } from "./run-preparation.js";
 import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
 import { podMutexService, type PodMutexGate, type PodMutexPass } from "../pod-mutex.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -95,7 +97,8 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db, agents as agentsTable } from "@paperclipai/db";
+type AgentRow = typeof agentsTable.$inferSelect;
 import { AGENT_DEFAULT_MAX_CONCURRENT_RUNS } from "@paperclipai/shared";
 import {
   agents,
@@ -977,6 +980,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
   }
 
   const accountLimitGate = createAccountLimitGate(db, accountCapacity);
+  // inferdyne fork: agents with fallback inference slots pick a slot here;
+  // agents without them keep the per-account limit gate above.
+  const inferenceSlotGate = createInferenceSlotGate(db, {
+    store: accountCapacity, settings: limitSettingsStore,
+    legacy: (run) => accountLimitGate.pass(run),
+    taskKeyOf: (run) => deriveTaskKey(parseObject(run.contextSnapshot), null),
+  });
+  /** Slot chosen by the gate for a run being claimed (read right after the gate). */
+  const selectedSlots = new Map<string, ResolvedSlot>();
 
   // inferdyne fork: pod mutex (services/pod-mutex.ts). Every claim path goes
   // through here, so the gate cannot be bypassed (executeRun, the per-agent
@@ -1000,12 +1012,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : run.issueId ?? run.nativeIssueId ?? readNonEmptyString(parseObject(run.contextSnapshot).issueId);
     // inferdyne fork: the run's AI account may be over its limit pace; the run
     // then stays queued (before any pod mutex lease is taken) and says why.
-    const passAccountLimitGate = () => accountLimitGate.pass(run);
+    const passAccountLimitGate = async (agent: AgentRow) => {
+      const picked = await inferenceSlotGate.pass(run, agent);
+      if (picked === null) return false;
+      if (picked !== "legacy") selectedSlots.set(run.id, picked);
+      return true;
+    };
     if (!mutexIssueId) return claimQueuedRunUngated(run, companyAgents, deferredPostCommitEffects, passAccountLimitGate);
     const podMutex = podMutexService(db);
     let gate: PodMutexGate | null = null;
-    const passMutexGate = async () => {
-      if (!(await passAccountLimitGate())) return false;
+    const passMutexGate = async (agent: AgentRow) => {
+      if (!(await passAccountLimitGate(agent))) return false;
       gate = await podMutex.tryAcquire(run.companyId, mutexIssueId, {
         pass: podMutexPass,
         actor: { actorType: "system", actorId: "pod_mutex", agentId: run.agentId, runId: run.id },
@@ -1042,7 +1059,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     companyAgents?: AgentOrgRow[],
     deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
     /** Last check before the claim itself (pod mutex gate); false keeps the run queued. */
-    beforeClaim?: () => Promise<boolean>,
+    beforeClaim?: (agent: AgentRow) => Promise<boolean>,
   ): Promise<typeof heartbeatRuns.$inferSelect | null> {
     if (run.status !== "queued") return run;
     const [caseHandoffReceipt] = run.wakeupRequestId ? await db.select().from(caseHandoffs).where(and(
@@ -1270,7 +1287,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
     }
 
-    if (beforeClaim && !(await beforeClaim())) return null;
+    selectedSlots.delete(run.id);
+    if (beforeClaim && !(await beforeClaim(agent))) {
+      selectedSlots.delete(run.id);
+      return null;
+    }
+    // inferdyne fork: the run dispatches the adapter of the selected slot.
+    const selectedSlot = selectedSlots.get(run.id);
+    selectedSlots.delete(run.id);
+    const dispatchAdapterType = selectedSlot ? overlayAgentWithSlot(agent, selectedSlot).adapterType : agent.adapterType;
 
     const claimedAt = new Date();
     const responsibleUserId = await resolveResponsibleUserIdForRun({
@@ -1519,7 +1544,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   .update(heartbeatRuns)
                   .set({
                     status: "running",
-                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: dispatchAdapterType } })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1626,7 +1651,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 .update(heartbeatRuns)
                 .set({
                   status: "running",
-                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: dispatchAdapterType } })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                   responsibleUserId,
                   startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1693,7 +1718,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : await withChatControlRecoveryGate(run, "claim", async (tx) => {
           const claimValues = {
             status: "running",
-            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: dispatchAdapterType } })}::jsonb`,
             ...legacyControllerClaim(run.runtimeMode),
             responsibleUserId,
             startedAt: run.startedAt ?? claimedAt,

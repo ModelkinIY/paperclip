@@ -2887,4 +2887,5 @@ export {
 export { readProviderFailure, type ProviderFailure } from "./provider-failure.generated.js";
 export * from "./pod-mutex.js";
 export * from "./ai-limit-wait.js";
+export * from "./inference-slots.js";
 export * from "./account-limits.js";

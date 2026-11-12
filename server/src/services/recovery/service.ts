@@ -1,3 +1,4 @@
+import { hasOpenFallbackSlot } from "../inference-slots/service.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
 import { notifyNativeEnvironmentSettlement } from "../native-environment-settlement-notifications.js";
 import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
@@ -4425,6 +4426,18 @@ export function recoveryService(
     const targetAgentId = getAdapterFailureRecoveryTargetAgentId(input.issue);
     if (!targetAgentId || input.latestRun.agentId !== targetAgentId)
       return null;
+
+    // inferdyne fork: an agent with another open inference slot need not wait
+    // for the provider reset; the next run is claimed on that slot.
+    const fallbackOpen = await hasOpenFallbackSlot(db, {
+      companyId: input.issue.companyId, agentId: targetAgentId,
+      responsibleUserId: (input.latestRun as { responsibleUserId?: string | null }).responsibleUserId ?? null,
+      failedRunContext: (input.latestRun as { contextSnapshot?: unknown }).contextSnapshot,
+    }).catch(() => false);
+    if (fallbackOpen) {
+      const soon = new Date(Date.now() + 30_000);
+      if (soon < input.classification.retryAt) input = { ...input, classification: { ...input.classification, retryAt: soon } };
+    }
 
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,

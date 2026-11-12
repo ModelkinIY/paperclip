@@ -12,6 +12,8 @@ export const aiGrantLimitSettings = pgTable("ai_grant_limit_settings", {
   weeklyParams: jsonb("weekly_params").$type<{ holdAbove: number; releaseAtOrBelow: number }>(),
   fiveHourParams: jsonb("five_hour_params").$type<{ holdAbove: number; releaseAtOrBelow: number }>(),
   maxStaleMinutes: integer("max_stale_minutes"),
+  /** Placeholder for the cache-aware soft-limit policy (separate task): "off" = always wait at a soft limit. */
+  cacheKeepaliveMode: text("cache_keepalive_mode").notNull().default("off"),
   lastObservation: jsonb("last_observation").$type<Record<string, unknown>>(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   updatedBy: text("updated_by"),

@@ -7,6 +7,6 @@ export { getPaceModel, registerPaceModel, paceModelIds, type PaceModel } from ".
 export { createAccountRateLimitScanner } from "./scanner.js";
 export { accountCapacity, limitSettingsStore, resetAccountCapacityForTests } from "./runtime.js";
 export { tickAccountLimits, probeGrant, discoverTrackedGrants, listActiveUserMemberships, listWaitingGrantIds, type AccountProbeUsage, type TrackedGrant } from "./probe.js";
-export { createAccountLimitGate, resolveRunAccountCandidates, type AccountCandidate } from "./gate.js";
+export { createAccountLimitGate, resolveRunAccountCandidates, resolveBindingAccountCandidates, type AccountCandidate } from "./gate.js";
 export { DbLimitSettingsStore } from "./settings-db.js";
 export { filterByAccountLimit, type PoolCandidateAccount } from "./pool.js";

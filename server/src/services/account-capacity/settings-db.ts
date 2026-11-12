@@ -13,6 +13,7 @@ function fromRow(row: Row): LimitSettings {
     weekly: row.weeklyParams ?? DEFAULT_LIMIT_SETTINGS.weekly,
     fiveHour: row.fiveHourParams ?? DEFAULT_LIMIT_SETTINGS.fiveHour,
     maxStaleMinutes: row.maxStaleMinutes ?? DEFAULT_LIMIT_SETTINGS.maxStaleMinutes,
+    cacheKeepaliveMode: row.cacheKeepaliveMode ?? DEFAULT_LIMIT_SETTINGS.cacheKeepaliveMode,
   };
 }
 

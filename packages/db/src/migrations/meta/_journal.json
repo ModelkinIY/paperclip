@@ -2969,6 +2969,13 @@
       "when": 1793858400000,
       "tag": "0425_ai_grant_limit_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 426,
+      "version": "7",
+      "when": 1793944800000,
+      "tag": "0426_agent_inference_slots",
+      "breakpoints": true
     }
   ]
 }

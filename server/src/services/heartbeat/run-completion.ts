@@ -1,3 +1,4 @@
+import { recordInferenceHardLimit } from "../inference-slots/service.js";
 import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { providerFailureFromError } from "../../vendor/paperclip-runner/index.js";
 import { nativeTaskSessionPublicationHandled } from "../native-runtime/native-task-session-publication.js";
@@ -671,6 +672,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       finalRunPatch,
       { adapterErrorMeta: adapterResult.errorMeta, secretValues: readFailureReportSecrets() },
     ));
+    // inferdyne fork: a provider-reported hard limit marks the slot's account
+    // (or the slot) exhausted until reset, so the next run takes another slot.
+    if (adapterResult.errorFamily === "provider_quota") {
+      await recordInferenceHardLimit(db, { run, agent, retryNotBefore: adapterResult.retryNotBefore ?? null, message: runErrorMessage ?? null })
+        .catch((err) => logger.warn({ err, runId: run.id }, "inference slots: failed to record provider hard limit"));
+    }
     let persistedRun: typeof heartbeatRuns.$inferSelect | null =
       persistedRunWrite.run;
     if (!persistedRunWrite.updated) {

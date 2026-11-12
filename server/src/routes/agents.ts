@@ -1,3 +1,6 @@
+import { inferenceSlotService, primarySlotOf, slotRunAdapterConfig, slotConfigFromAgentConfig, AGENT_LEVEL_ADAPTER_KEYS, PRIMARY_SLOT_ID } from "../services/inference-slots/service.js";
+import { accountCapacity } from "../services/account-capacity/index.js";
+import { agentInferenceSlotsSaveSchema, type AgentInferenceSlotInput, type AgentInferenceSlotsSave } from "@paperclipai/shared";
 import { readTaskPanelActivations } from "../services/plugin-task-panels.js";
 import { enqueueNativeRuntimeResponse } from "../services/native-runtime/native-runtime-response-delivery.js";
 import { latestFailedRunsByAgent } from "@paperclipai/shared";
@@ -5429,6 +5432,112 @@ export function agentRoutes(
     // available to the sweeper if this process exits or dispatch is deferred.
     await connectionIntentDeliveryService(db, heartbeat).tryDeliver(interactionId);
     res.json(completed);
+  });
+
+  // --- inferdyne fork: inference slots (ordered fallback adapters) -----------
+  // The agent's own adapter fields are slot "primary"; these routes manage the
+  // fallback slots (priority 1..n) and swapping a fallback into the primary.
+  async function prepareInferenceSlotForPersistence(req: Request, existing: NonNullable<Awaited<ReturnType<typeof svc.getById>>>,
+    input: AgentInferenceSlotInput, previous: { adapterConfig: Record<string, unknown> } | null) {
+    const adapterType = await assertSelectableAdapterType(input.adapterType, input.adapterConfig, existing.companyId);
+    let config = previous ? restoreRedactedAgentEnv(input.adapterConfig, previous.adapterConfig) : input.adapterConfig;
+    // Agent-level keys (instructions, prompts, cwd, skills, timeouts) stay on the agent.
+    config = Object.fromEntries(Object.entries(config).filter(([key]) => !(AGENT_LEVEL_ADAPTER_KEYS as readonly string[]).includes(key)));
+    assertNoAgentLocalAdapterHostCommandMutation(req, adapterType, config, false, config);
+    const normalized = await normalizeMediatedAdapterConfigForPersistence({
+      companyId: existing.companyId, adapterType, adapterConfig: applyCreateDefaultsByAdapterType(adapterType, config),
+    });
+    for (const key of AGENT_LEVEL_ADAPTER_KEYS) delete normalized[key];
+    let aiConnection: Record<string, unknown> | null = null;
+    if (input.aiConnection) {
+      const binding = aiRuntimeConnectionBindingSchema.safeParse(input.aiConnection);
+      if (!binding.success) throw unprocessable("Invalid AI connection for the inference slot");
+      if (binding.data.mode === "router") throw unprocessable("Connection pools cannot be used in an inference slot; add each account as its own slot");
+      if (!isAiConnectionCompatible(binding.data, adapterType, normalized.model, normalized.provider, normalized.acpxAgent)) {
+        throw unprocessable("Select an AI connection compatible with the slot's adapter and model");
+      }
+      await validateManagedAgentBinding(req, existing.companyId, existing.id, adapterType, normalized, binding.data, existing.defaultEnvironmentId, false);
+      aiConnection = binding.data as Record<string, unknown>;
+    }
+    return { id: input.id, enabled: input.enabled, label: input.label ?? null, adapterType, adapterConfig: normalized, aiConnection };
+  }
+
+  async function inferenceSlotsResponse(agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
+    const slotsSvc = inferenceSlotService(db);
+    const rows = await slotsSvc.listFallbacks(agent.id);
+    const all = [primarySlotOf(agent), ...rows.map((r) => ({ id: r.id, priority: r.priority, enabled: r.enabled, label: r.label, adapterType: r.adapterType, adapterConfig: r.adapterConfig ?? {}, aiConnection: r.aiConnection ?? null }))];
+    const { statuses } = await slotsSvc.slotStatuses({ companyId: agent.companyId, agentId: agent.id, responsibleUserId: null, slots: all, store: accountCapacity, now: new Date() })
+      .catch(() => ({ statuses: new Map() }));
+    return {
+      slots: all.map((slot) => ({
+        id: slot.id, agentId: agent.id, priority: slot.priority, enabled: slot.enabled, label: slot.label,
+        primary: slot.id === PRIMARY_SLOT_ID, adapterType: slot.adapterType,
+        adapterConfig: redactAgentAdapterConfig(slot.adapterConfig), aiConnection: slot.aiConnection,
+        status: statuses.get(slot.id) ?? null,
+      })),
+    };
+  }
+
+  router.get("/agents/:id/inference-slots", async (req, res) => {
+    const agent = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
+    if (!agent) return;
+    res.json(await inferenceSlotsResponse(agent));
+  });
+
+  router.put("/agents/:id/inference-slots", validate(agentInferenceSlotsSaveSchema), async (req, res) => {
+    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
+    if (!existing) return;
+    if (req.actor.type === "agent") throw forbidden("Only an operator can configure inference slots");
+    await assertCanConfigureAgentSetup(req, existing);
+    const body = req.body as AgentInferenceSlotsSave;
+    const slotsSvc = inferenceSlotService(db);
+    const previous = new Map((await slotsSvc.listFallbacks(existing.id)).map((r) => [r.id, r]));
+    const prepared = [];
+    for (const input of body.slots) {
+      const prior = input.id ? previous.get(input.id) ?? null : null;
+      if (input.id && !prior) throw unprocessable("Unknown inference slot");
+      prepared.push(await prepareInferenceSlotForPersistence(req, existing, input, prior ? { adapterConfig: prior.adapterConfig ?? {} } : null));
+    }
+    await slotsSvc.replaceFallbacks(existing.companyId, existing.id, prepared);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: existing.companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
+      action: "agent.inference_slots.updated", entityType: "agent", entityId: existing.id,
+      details: { slots: prepared.map((p, i) => ({ priority: i + 1, adapterType: p.adapterType, model: p.adapterConfig.model ?? null, enabled: p.enabled })) },
+    });
+    res.json(await inferenceSlotsResponse(existing));
+  });
+
+  /** Swap a fallback slot with the primary (the agent's own adapter fields). */
+  router.post("/agents/:id/inference-slots/:slotId/promote", async (req, res) => {
+    const existing = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
+    if (!existing) return;
+    if (req.actor.type === "agent") throw forbidden("Only an operator can configure inference slots");
+    await assertCanConfigureAgentSetup(req, existing);
+    const slotsSvc = inferenceSlotService(db);
+    const rows = await slotsSvc.listFallbacks(existing.id);
+    const target = rows.find((r) => r.id === req.params.slotId);
+    if (!target) throw notFound("Inference slot not found");
+    const primary = primarySlotOf(existing);
+    const agentConfig = asRecord(existing.adapterConfig) ?? {};
+    const nextAgentConfig = slotRunAdapterConfig(agentConfig, target.adapterConfig ?? {});
+    const nextRuntimeConfig = { ...existing.runtimeConfig } as Record<string, unknown>;
+    if (target.aiConnection) nextRuntimeConfig.aiConnection = target.aiConnection; else delete nextRuntimeConfig.aiConnection;
+    const actor = getActorInfo(req);
+    const updated = await svc.update(existing.id, { adapterType: target.adapterType, adapterConfig: nextAgentConfig, runtimeConfig: nextRuntimeConfig }, {
+      recordRevision: { createdByAgentId: actor.agentId, createdByUserId: actor.actorType === "user" ? actor.actorId : null, source: "patch" },
+    });
+    if (!updated) throw notFound("Agent not found");
+    // The former primary takes the promoted slot's place in the list.
+    await slotsSvc.replaceFallbacks(existing.companyId, existing.id, rows.map((r) => r.id === target.id
+      ? { id: r.id, enabled: true, label: r.label, adapterType: primary.adapterType, adapterConfig: slotConfigFromAgentConfig(agentConfig), aiConnection: primary.aiConnection }
+      : { id: r.id, enabled: r.enabled, label: r.label, adapterType: r.adapterType, adapterConfig: r.adapterConfig ?? {}, aiConnection: r.aiConnection ?? null }));
+    await logActivity(db, {
+      companyId: existing.companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
+      action: "agent.inference_slots.promoted", entityType: "agent", entityId: existing.id,
+      details: { slotId: target.id, adapterType: target.adapterType, model: (target.adapterConfig ?? {}).model ?? null },
+    });
+    res.json(await inferenceSlotsResponse(updated));
   });
 
   router.patch("/agents/:id", validate(updateAgentSchema), async (req, res) => {

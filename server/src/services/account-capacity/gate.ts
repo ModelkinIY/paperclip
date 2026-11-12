@@ -26,28 +26,33 @@ export interface AccountCandidate { grantId: string; provider: AiProvider; metho
  */
 export async function resolveRunAccountCandidates(db: Db, run: RunRow): Promise<AccountCandidate[]> {
   const [agent] = await db.select({ runtimeConfig: agents.runtimeConfig }).from(agents).where(eq(agents.id, run.agentId)).limit(1);
-  const binding = aiRuntimeConnectionBindingSchema.safeParse((agent?.runtimeConfig as Record<string, unknown> | null)?.aiConnection);
+  return resolveBindingAccountCandidates(db, run.companyId, run.responsibleUserId, (agent?.runtimeConfig as Record<string, unknown> | null)?.aiConnection);
+}
+
+/** Same as resolveRunAccountCandidates for an explicit runtimeConfig.aiConnection (inference slots). */
+export async function resolveBindingAccountCandidates(db: Db, companyId: string, responsibleUserId: string | null, aiConnection: unknown): Promise<AccountCandidate[]> {
+  const binding = aiRuntimeConnectionBindingSchema.safeParse(aiConnection);
   if (!binding.success) return [];
   const b = binding.data;
   let grantId: string | null = null;
   if (b.mode === "shared" || b.mode === "delegated") grantId = b.grantId;
   else if (b.mode === "responsible_user") {
     // The run's own user, else the company default the start would fall back to.
-    let userId = run.responsibleUserId;
+    let userId = responsibleUserId;
     if (!userId) {
-      const [company] = await db.select({ userId: companies.defaultResponsibleUserId }).from(companies).where(eq(companies.id, run.companyId)).limit(1);
+      const [company] = await db.select({ userId: companies.defaultResponsibleUserId }).from(companies).where(eq(companies.id, companyId)).limit(1);
       userId = company?.userId ?? null;
     }
     if (!userId) return [];
     const [row] = await db.select({ grantId: aiProviderDefaults.grantId }).from(aiProviderDefaults).where(and(
-      eq(aiProviderDefaults.companyId, run.companyId), eq(aiProviderDefaults.userId, userId),
+      eq(aiProviderDefaults.companyId, companyId), eq(aiProviderDefaults.userId, userId),
       eq(aiProviderDefaults.provider, b.provider))).limit(1);
     grantId = row?.grantId ?? null;
   }
   if (!grantId) return [];
   const [acct] = await db.select({ name: toolConnections.name, config: toolConnections.config }).from(connectionGrants)
     .innerJoin(toolConnections, eq(toolConnections.id, connectionGrants.connectionId))
-    .where(and(eq(connectionGrants.id, grantId), eq(connectionGrants.companyId, run.companyId))).limit(1);
+    .where(and(eq(connectionGrants.id, grantId), eq(connectionGrants.companyId, companyId))).limit(1);
   const meta = aiConnectionMetadataSchema.safeParse((acct?.config as Record<string, unknown> | undefined)?.ai);
   if (!acct || !meta.success) return [];
   return [{ grantId, provider: meta.data.provider, method: meta.data.method, accountName: acct.name ?? null }];
