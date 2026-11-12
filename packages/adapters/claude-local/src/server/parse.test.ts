@@ -211,6 +211,23 @@ describe("isClaudeTransientUpstreamError", () => {
     );
   });
 
+  it("classifies the hyphenated window wording ('5-hour limit') as provider quota (INF-532)", () => {
+    const now = new Date("2026-11-12T10:11:56.000Z");
+    const errorMessage = "You've hit your 5-hour limit · resets 12:10pm (UTC)";
+
+    expect(isClaudeProviderQuotaError({ errorMessage })).toBe(true);
+    expect(isClaudeTransientUpstreamError({ errorMessage })).toBe(false);
+    expect(extractClaudeRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
+      "2026-11-12T12:10:00.000Z",
+    );
+  });
+
+  it("classifies the structured api_error usage_limit_reached as provider quota regardless of wording", () => {
+    const parsed = { type: "result", subtype: "success", is_error: true, api_error: "usage_limit_reached", api_error_status: 429, result: "Some new wording" };
+    expect(isClaudeProviderQuotaError({ parsed })).toBe(true);
+    expect(isClaudeTransientUpstreamError({ parsed })).toBe(false);
+  });
+
   it("classifies Anthropic API rate_limit_error and overloaded_error as transient", () => {
     expect(
       isClaudeTransientUpstreamError({

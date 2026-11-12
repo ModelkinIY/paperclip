@@ -1093,3 +1093,16 @@ describe("mergeHeartbeatRunResultJson", () => {
     });
   });
 });
+
+describe("provider error presentation (INF-532)", () => {
+  it.each(["provider_quota", "transient_upstream"])("does not turn a %s error text into an issue comment", errorFamily => {
+    const text = "You've hit your 5-hour limit · resets 12:10pm (UTC)";
+    const resolved = resolveHeartbeatRunResponse({
+      resultJson: { type: "result", subtype: "success", is_error: true, result: text, summary: text, errorFamily },
+      finalAgentMessage: { text, sourceEventId: null, channel: "final" },
+    });
+    expect(resolved.text).toBeNull();
+    expect(resolved.decision.commentAction).toBe("none");
+    expect(resolved.decision.reasonCodes).toEqual(["provider_error_not_agent_response"]);
+  });
+});

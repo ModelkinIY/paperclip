@@ -420,6 +420,15 @@ export function resolveHeartbeatRunResponse(input: {
   } | null;
 }): ResolvedHeartbeatRunResponse {
   const resultJson = record(input.resultJson);
+  // A provider limit/outage text ("You've hit your 5-hour limit ...") is the
+  // provider's error, not the agent's answer: never materialize it as a comment.
+  // The run status and the recovery hold carry it instead (INF-532).
+  if (resultJson.errorFamily === "provider_quota" || resultJson.errorFamily === "transient_upstream") {
+    return {
+      text: null,
+      decision: decision("none", { commentAction: "none", reasonCodes: ["provider_error_not_agent_response"] }),
+    };
+  }
   const continuationSummary = readAcceptedTaskContinuationSummary(resultJson);
   if (continuationSummary) {
     if (input.interactionOwnsResponse) return {
