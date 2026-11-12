@@ -5445,7 +5445,8 @@ export function agentRoutes(
     config = Object.fromEntries(Object.entries(config).filter(([key]) => !(AGENT_LEVEL_ADAPTER_KEYS as readonly string[]).includes(key)));
     assertNoAgentLocalAdapterHostCommandMutation(req, adapterType, config, false, config);
     const normalized = await normalizeMediatedAdapterConfigForPersistence({
-      companyId: existing.companyId, adapterType, adapterConfig: applyCreateDefaultsByAdapterType(adapterType, config),
+      companyId: existing.companyId, adapterType,
+      adapterConfig: applyCodexLocalKeyIsolation(existing.companyId, existing.id, adapterType, applyCreateDefaultsByAdapterType(adapterType, config)),
     });
     for (const key of AGENT_LEVEL_ADAPTER_KEYS) delete normalized[key];
     let aiConnection: Record<string, unknown> | null = null;
@@ -5481,6 +5482,12 @@ export function agentRoutes(
   router.get("/agents/:id/inference-slots", async (req, res) => {
     const agent = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Agent not found");
     if (!agent) return;
+    if (!(await assertAgentReadAllowed(req, res, agent))) return;
+    // Slot configs are configuration detail: same bar as the full agent view.
+    if (req.actor.type === "agent" || !(await actorCanReadConfigurationsForCompany(req, agent.companyId, agent.id))) {
+      res.status(403).json({ error: "Reading inference slots requires configuration access" });
+      return;
+    }
     res.json(await inferenceSlotsResponse(agent));
   });
 
@@ -5520,7 +5527,10 @@ export function agentRoutes(
     if (!target) throw notFound("Inference slot not found");
     const primary = primarySlotOf(existing);
     const agentConfig = asRecord(existing.adapterConfig) ?? {};
-    const nextAgentConfig = slotRunAdapterConfig(agentConfig, target.adapterConfig ?? {});
+    const nextAgentConfig = await normalizeMediatedAdapterConfigForPersistence({
+      companyId: existing.companyId, adapterType: target.adapterType,
+      adapterConfig: applyCodexLocalKeyIsolation(existing.companyId, existing.id, target.adapterType, slotRunAdapterConfig(agentConfig, target.adapterConfig ?? {}, target.adapterType === existing.adapterType)),
+    });
     const nextRuntimeConfig = { ...existing.runtimeConfig } as Record<string, unknown>;
     if (target.aiConnection) nextRuntimeConfig.aiConnection = target.aiConnection; else delete nextRuntimeConfig.aiConnection;
     const actor = getActorInfo(req);
@@ -5530,8 +5540,10 @@ export function agentRoutes(
     if (!updated) throw notFound("Agent not found");
     // The former primary takes the promoted slot's place in the list.
     await slotsSvc.replaceFallbacks(existing.companyId, existing.id, rows.map((r) => r.id === target.id
-      ? { id: r.id, enabled: true, label: r.label, adapterType: primary.adapterType, adapterConfig: slotConfigFromAgentConfig(agentConfig), aiConnection: primary.aiConnection }
+      ? { id: r.id, enabled: true, label: null, adapterType: primary.adapterType, adapterConfig: slotConfigFromAgentConfig(agentConfig), aiConnection: primary.aiConnection }
       : { id: r.id, enabled: r.enabled, label: r.label, adapterType: r.adapterType, adapterConfig: r.adapterConfig ?? {}, aiConnection: r.aiConnection ?? null }));
+    // Task affinity, slot-keyed hard limits and queued slot choices follow the configs.
+    await slotsSvc.followPromotedConfigs(existing.id, target.id);
     await logActivity(db, {
       companyId: existing.companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
       action: "agent.inference_slots.promoted", entityType: "agent", entityId: existing.id,

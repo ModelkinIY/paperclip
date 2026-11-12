@@ -1,3 +1,4 @@
+import { hasOpenFallbackSlot } from "../inference-slots/service.js";
 import { notifyAttentionRetentionWork } from "../retention-work-notifications.js";
 import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
@@ -470,7 +471,12 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       transientRecovery?.errorFamily === "transient_upstream"
         ? resolveCodexTransientFallbackMode(nextAttempt)
         : null;
-    const transientRetryNotBefore = transientRecovery?.retryNotBefore ?? null;
+    // inferdyne fork: a provider hard limit need not be waited out when another inference slot is open.
+    const transientRetryNotBefore = transientRecovery?.retryNotBefore
+      && readNonEmptyString(parseObject(run.resultJson).errorFamily) === "provider_quota"
+      && await hasOpenFallbackSlot(db, run.id).catch(() => false)
+      ? null
+      : transientRecovery?.retryNotBefore ?? null;
     const contextSnapshot = parseObject(run.contextSnapshot);
     // A retry inherits the durable authorization scope of its source run. Do
     // not promote an untrusted or legacy contextSnapshot.issueId into a new

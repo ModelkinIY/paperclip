@@ -1,4 +1,4 @@
-import { inferenceSlotService, overlayAgentWithSlot, PRIMARY_SLOT_ID } from "./inference-slots/service.js";
+import { applySlotSelectionAtStart } from "./inference-slots/service.js";
 import { registerDeferredReceiptWork } from "./heartbeat/deferred-receipt-work.js";
 import { reconcileTaskChatRetryReceipts } from "./task-retry.js";
 import { registerIssueRecoveryWork } from "./recovery/work.js";
@@ -2043,11 +2043,11 @@ export function heartbeatService(
       let agent = loadedAgent;
       // inferdyne fork: a run claimed on a fallback inference slot runs that
       // slot's adapter, model and AI connection; the rest of the agent stays.
-      const slotSelection = readInferenceSlotSelection(run.contextSnapshot);
-      if (slotSelection && slotSelection.slotId !== PRIMARY_SLOT_ID) {
-        const slot = await inferenceSlotService(db).resolveSlot(loadedAgent, slotSelection.slotId);
-        if (!slot) throw new Error("The inference slot this run was claimed on was removed; start a new turn.");
-        agent = overlayAgentWithSlot(loadedAgent, slot);
+      if (readInferenceSlotSelection(run.contextSnapshot)) {
+        agent = await applySlotSelectionAtStart(db, {
+          run, agent: loadedAgent, claimedAdapterType: claimedAdapterType(run),
+          taskKey: deriveTaskKey(parseObject(run.contextSnapshot), null),
+        });
       }
 
       // The claimed adapter identity is immutable recovery evidence. Do not

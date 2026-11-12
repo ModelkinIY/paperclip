@@ -13,6 +13,7 @@ import {
 import { readAiLimitRunWait, readInferenceSlotSelection, type AgentInferenceSlot, type AiLimitRunWait, type InferenceSlotSelection, type InferenceSlotStatus } from "@paperclipai/shared";
 import { logger } from "../../middleware/logger.js";
 import { resolveBindingAccountCandidates } from "../account-capacity/gate.js";
+import { accountCapacity } from "../account-capacity/runtime.js";
 import type { AccountCapacityStore, LimitSettingsStore } from "../account-capacity/store.js";
 import { selectInferenceSlot, waitAtSoftLimit, type SoftLimitPolicy, type TaskAffinity } from "./select.js";
 
@@ -69,8 +70,10 @@ function recordOf(v: unknown): Record<string, unknown> {
 }
 
 /** adapterConfig a run on `slot` uses: the slot's, plus the agent-level keys and non-provider env of the agent. */
-export function slotRunAdapterConfig(agentConfig: Record<string, unknown>, slotConfig: Record<string, unknown>) {
-  const out: Record<string, unknown> = { ...slotConfig };
+export function slotRunAdapterConfig(agentConfig: Record<string, unknown>, slotConfig: Record<string, unknown>, sameAdapter = false) {
+  // Same adapter: the agent's own settings (permissions, args, turn limits...) stay, the slot overrides.
+  const base = sameAdapter ? Object.fromEntries(Object.entries(agentConfig).filter(([k]) => k !== "env" && k !== "model")) : {};
+  const out: Record<string, unknown> = { ...base, ...slotConfig };
   for (const key of AGENT_LEVEL_ADAPTER_KEYS) {
     if (agentConfig[key] !== undefined) out[key] = agentConfig[key];
     else delete out[key];
@@ -92,7 +95,7 @@ export function overlayAgentWithSlot<T extends Pick<AgentRow, "adapterType" | "a
   const runtimeConfig = { ...((agent.runtimeConfig ?? {}) as Record<string, unknown>) };
   if (slot.aiConnection) runtimeConfig.aiConnection = slot.aiConnection;
   else delete runtimeConfig.aiConnection;
-  const adapterConfig = slotRunAdapterConfig(recordOf(agent.adapterConfig), slot.adapterConfig);
+  const adapterConfig = slotRunAdapterConfig(recordOf(agent.adapterConfig), slot.adapterConfig, slot.adapterType === agent.adapterType);
   return { ...agent, adapterType: slot.adapterType, adapterConfig, runtimeConfig };
 }
 
@@ -160,7 +163,7 @@ export function inferenceSlotService(db: Db) {
   }
 
   /** Task affinity: the slot the task ran on; a task with a session but no row ran on the primary. */
-  async function getAffinity(agentId: string, taskKey: string): Promise<TaskAffinity | null> {
+  async function getAffinity(agentId: string, taskKey: string, primaryAdapterType?: string): Promise<TaskAffinity | null> {
     const [row] = await db.select().from(agentInferenceSlotTaskState).where(and(
       eq(agentInferenceSlotTaskState.agentId, agentId), eq(agentInferenceSlotTaskState.taskKey, taskKey))).limit(1);
     if (row) {
@@ -172,7 +175,8 @@ export function inferenceSlotService(db: Db) {
       return { slotId: row.slotId, lastRunFinishedAt: finished };
     }
     const [session] = await db.select({ id: agentTaskSessions.id, updatedAt: agentTaskSessions.updatedAt }).from(agentTaskSessions).where(and(
-      eq(agentTaskSessions.agentId, agentId), eq(agentTaskSessions.taskKey, taskKey))).limit(1);
+      eq(agentTaskSessions.agentId, agentId), eq(agentTaskSessions.taskKey, taskKey),
+      ...(primaryAdapterType ? [eq(agentTaskSessions.adapterType, primaryAdapterType)] : []))).limit(1);
     return session ? { slotId: PRIMARY_SLOT_ID, lastRunFinishedAt: session.updatedAt } : null;
   }
 
@@ -237,13 +241,35 @@ export function inferenceSlotService(db: Db) {
     return { statuses, accounts };
   }
 
+  /**
+   * After a promote the configs moved between "primary" and `slotId`: move task
+   * affinity and slot-keyed hard limits with them, and drop the slot choice of
+   * runs that are still queued (they pick again at claim).
+   */
+  async function followPromotedConfigs(agentId: string, slotId: string) {
+    await db.transaction(async (tx) => {
+      await tx.execute(sql`
+        UPDATE agent_inference_slot_task_state
+        SET slot_id = CASE WHEN slot_id = ${PRIMARY_SLOT_ID} THEN ${slotId} ELSE ${PRIMARY_SLOT_ID} END, updated_at = now()
+        WHERE agent_id = ${agentId} AND slot_id IN (${PRIMARY_SLOT_ID}, ${slotId})`);
+      const a = `slot:${agentId}:${PRIMARY_SLOT_ID}`, b = `slot:${agentId}:${slotId}`, tmp = `slot:${agentId}:swap`;
+      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${tmp} WHERE key = ${a}`);
+      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${a} WHERE key = ${b}`);
+      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${b} WHERE key = ${tmp}`);
+      await tx.execute(sql`
+        UPDATE heartbeat_runs SET context_snapshot = context_snapshot - 'inferenceSlot'
+        WHERE agent_id = ${agentId} AND status = 'queued' AND started_at IS NULL
+          AND jsonb_typeof(context_snapshot) = 'object' AND jsonb_exists(context_snapshot, 'inferenceSlot')`);
+    });
+  }
+
   async function allSlots(agent: AgentRow): Promise<ResolvedSlot[]> {
     return [primarySlotOf(agent), ...(await listFallbacks(agent.id)).map(fromRow)];
   }
 
   return {
     listFallbacks, hasFallbacks, resolveSlot, replaceFallbacks, getAffinity, setAffinity, resetTaskSessions,
-    recordExhaustion, slotStatuses, allSlots,
+    recordExhaustion, slotStatuses, allSlots, followPromotedConfigs,
   };
 }
 
@@ -278,6 +304,14 @@ export function createInferenceSlotGate(db: Db, deps: {
     `);
   }
 
+  /** A run going the agent's own way must not carry a slot choice from an earlier attempt (retries copy the context). */
+  async function legacyOutcome(run: RunRow, outcome: "legacy" | null): Promise<"legacy" | null> {
+    if (outcome === "legacy" && readInferenceSlotSelection(run.contextSnapshot)) {
+      await writeContext(run.id, {}, ["inferenceSlot"]).catch((err) => logger.warn({ err, runId: run.id }, "inference slots: failed to clear a stale slot choice"));
+    }
+    return outcome;
+  }
+
   return {
     /** Selected slot when the run may start, null when it stays queued. Agents without fallbacks: "legacy". */
     async pass(run: RunRow, agent: AgentRow): Promise<ResolvedSlot | "legacy" | null> {
@@ -288,16 +322,16 @@ export function createInferenceSlotGate(db: Db, deps: {
       }
       let slots: ResolvedSlot[];
       try {
-        if (!(await svc.hasFallbacks(agent.id))) return (await deps.legacy(run)) ? "legacy" : null;
+        if (!(await svc.hasFallbacks(agent.id))) return legacyOutcome(run, (await deps.legacy(run)) ? "legacy" : null);
         slots = await svc.allSlots(agent);
       } catch (err) {
         logger.warn({ err, runId: run.id }, "inference slots: lookup failed; using the agent's own adapter");
-        return "legacy";
+        return legacyOutcome(run, "legacy");
       }
       const t = now();
       const taskKey = deps.taskKeyOf(run);
       try {
-        const affinity = taskKey ? await svc.getAffinity(agent.id, taskKey) : null;
+        const affinity = taskKey ? await svc.getAffinity(agent.id, taskKey, agent.adapterType) : null;
         const { statuses, accounts } = await svc.slotStatuses({ companyId: run.companyId, agentId: agent.id, responsibleUserId: run.responsibleUserId, slots, store: deps.store, now: t });
         const choice = selectInferenceSlot({
           slots, statuses, affinity, policy: deps.policy ?? waitAtSoftLimit, now: t,
@@ -306,7 +340,7 @@ export function createInferenceSlotGate(db: Db, deps: {
             return grantId ? deps.settings.get(grantId).cacheKeepaliveMode : "off";
           },
         });
-        if (!choice) return "legacy";
+        if (!choice) return legacyOutcome(run, "legacy");
         if (choice.kind === "wait") {
           const st = statuses.get(choice.slotId)!;
           const acct = accounts.get(choice.slotId);
@@ -324,16 +358,14 @@ export function createInferenceSlotGate(db: Db, deps: {
           slotId: slot.id, priority: slot.priority, adapterType: slot.adapterType, label: slot.label,
           model: slotModel(slot), reason: choice.reason, previousSlotId: choice.previousSlotId,
         };
-        if (taskKey) {
-          if (choice.previousSlotId) await svc.resetTaskSessions(agent.id, taskKey);
-          await svc.setAffinity(run.companyId, agent.id, taskKey, slot.id, run.id);
-        }
+        // Affinity and the session reset of a switch happen when the run really
+        // starts (applySlotSelectionAtStart), not here: the claim may still fail.
         await writeContext(run.id, { inferenceSlot: selection }, ["aiLimitWait"]);
         return slot;
       } catch (err) {
         // The gate must never stop work because of its own failure.
         logger.warn({ err, runId: run.id }, "inference slot gate failed; using the agent's own adapter");
-        return "legacy";
+        return legacyOutcome(run, (await deps.legacy(run).catch(() => true)) ? "legacy" : null);
       }
     },
   };
@@ -361,14 +393,17 @@ export async function recordInferenceHardLimit(db: Db, input: {
 }
 
 /** True when another enabled slot of the agent is not exhausted right now (retry need not wait for the reset). */
-export async function hasOpenFallbackSlot(db: Db, input: { companyId: string; agentId: string; responsibleUserId: string | null; failedRunContext: unknown }) {
+export async function hasOpenFallbackSlot(db: Db, failedRunId: string) {
+  const [run] = await db.select({ companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, responsibleUserId: heartbeatRuns.responsibleUserId, contextSnapshot: heartbeatRuns.contextSnapshot })
+    .from(heartbeatRuns).where(eq(heartbeatRuns.id, failedRunId)).limit(1);
+  if (!run) return false;
+  const input = { ...run, failedRunContext: run.contextSnapshot };
   const svc = inferenceSlotService(db);
   if (!(await svc.hasFallbacks(input.agentId))) return false;
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1);
   if (!agent) return false;
   const failedSlot = readInferenceSlotSelection(input.failedRunContext)?.slotId ?? PRIMARY_SLOT_ID;
   const slots = await svc.allSlots(agent);
-  const { accountCapacity } = await import("../account-capacity/runtime.js");
   const { statuses } = await svc.slotStatuses({ companyId: input.companyId, agentId: input.agentId, responsibleUserId: input.responsibleUserId, slots, store: accountCapacity, now: new Date() });
   return slots.some((s) => s.id !== failedSlot && statuses.get(s.id)?.state === "available");
 }
@@ -381,4 +416,37 @@ export function slotConfigFromAgentConfig(agentConfig: Record<string, unknown>) 
   for (const [k, v] of Object.entries(recordOf(agentConfig.env))) if (PROVIDER_ENV_RE.test(k)) env[k] = v;
   if (Object.keys(env).length) out.env = env; else delete out.env;
   return out;
+}
+
+/**
+ * Run start (claimed, about to execute): the slot the run really uses. Trusts
+ * the recorded choice only when it matches the adapter the claim dispatched;
+ * records task affinity and drops the old slot's sessions on a switch.
+ */
+export async function applySlotSelectionAtStart<T extends AgentRow>(db: Db, input: {
+  run: { id: string; companyId: string; contextSnapshot: unknown };
+  agent: T;
+  claimedAdapterType: string | null;
+  taskKey: string | null;
+}): Promise<T> {
+  const selection = readInferenceSlotSelection(input.run.contextSnapshot);
+  if (!selection) return input.agent;
+  if (input.claimedAdapterType && selection.adapterType !== input.claimedAdapterType) return input.agent;
+  const svc = inferenceSlotService(db);
+  let agent = input.agent;
+  if (selection.slotId !== PRIMARY_SLOT_ID) {
+    const slot = await svc.resolveSlot(input.agent, selection.slotId);
+    if (!slot) throw new Error("The inference slot this run was claimed on was removed; start a new turn.");
+    agent = overlayAgentWithSlot(input.agent, slot);
+  }
+  if (input.taskKey) {
+    try {
+      const prior = await svc.getAffinity(input.agent.id, input.taskKey, input.agent.adapterType);
+      if (prior && prior.slotId !== selection.slotId) await svc.resetTaskSessions(input.agent.id, input.taskKey);
+      await svc.setAffinity(input.run.companyId, input.agent.id, input.taskKey, selection.slotId, input.run.id);
+    } catch (err) {
+      logger.warn({ err, runId: input.run.id }, "inference slots: failed to record task affinity");
+    }
+  }
+  return agent;
 }

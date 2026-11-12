@@ -4429,11 +4429,7 @@ export function recoveryService(
 
     // inferdyne fork: an agent with another open inference slot need not wait
     // for the provider reset; the next run is claimed on that slot.
-    const fallbackOpen = await hasOpenFallbackSlot(db, {
-      companyId: input.issue.companyId, agentId: targetAgentId,
-      responsibleUserId: (input.latestRun as { responsibleUserId?: string | null }).responsibleUserId ?? null,
-      failedRunContext: (input.latestRun as { contextSnapshot?: unknown }).contextSnapshot,
-    }).catch(() => false);
+    const fallbackOpen = await hasOpenFallbackSlot(db, input.latestRun.id).catch(() => false);
     if (fallbackOpen) {
       const soon = new Date(Date.now() + 30_000);
       if (soon < input.classification.retryAt) input = { ...input, classification: { ...input.classification, retryAt: soon } };

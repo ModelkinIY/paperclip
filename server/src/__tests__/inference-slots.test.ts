@@ -204,6 +204,41 @@ describeDb("inference slots", () => {
     expect(ex!.key).toBe(`slot:${s.agent.id}:${s.fallback.id}`);
   });
 
+  it("a retry that carries a stale slot choice runs on the primary once the fallbacks are gone", async () => {
+    const s = await seed();
+    await inferenceSlotService(db).replaceFallbacks(s.companyId, s.agent.id, []);
+    const id = await s.queuedRun("task-7");
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskKey: "task-7", inferenceSlot: { slotId: s.fallback.id, adapterType: "claude_local", priority: 1, label: null, model: null, reason: "priority", previousSlotId: null } } })
+      .where(eq(heartbeatRuns.id, id));
+    await s.drain();
+    const run = await s.runRow(id);
+    expect(readInferenceSlotSelection(run.contextSnapshot)).toBeNull();
+    expect((run.runnerProfileJson as Record<string, any>).adapterDispatch.adapterType).toBe("codex_local");
+    expect(run.error ?? "").not.toContain("inference slot");
+  });
+
+  it("promote moves task affinity and slot-keyed limits with the configs and drops queued choices", async () => {
+    const s = await seed();
+    const svc = inferenceSlotService(db);
+    await svc.setAffinity(s.companyId, s.agent.id, "on-primary", PRIMARY_SLOT_ID, randomUUID());
+    await svc.setAffinity(s.companyId, s.agent.id, "on-fallback", s.fallback.id, randomUUID());
+    await svc.recordExhaustion({ companyId: s.companyId, key: `slot:${s.agent.id}:${s.fallback.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
+    const queued = await s.queuedRun("q");
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskKey: "q", inferenceSlot: { slotId: s.fallback.id, adapterType: "claude_local" } } }).where(eq(heartbeatRuns.id, queued));
+    await svc.followPromotedConfigs(s.agent.id, s.fallback.id);
+    const rows = await db.select().from(agentInferenceSlotTaskState).where(eq(agentInferenceSlotTaskState.agentId, s.agent.id));
+    expect(Object.fromEntries(rows.map((r) => [r.taskKey, r.slotId]))).toEqual({ "on-primary": s.fallback.id, "on-fallback": PRIMARY_SLOT_ID });
+    const [ex] = await db.select().from(inferenceExhaustions).where(eq(inferenceExhaustions.companyId, s.companyId));
+    expect(ex!.key).toBe(`slot:${s.agent.id}:${PRIMARY_SLOT_ID}`);
+    expect(readInferenceSlotSelection((await s.runRow(queued)).contextSnapshot)).toBeNull();
+  });
+
+  it("a fallback on the same adapter keeps the agent's other adapter settings", () => {
+    const agent = { adapterType: "claude_local", runtimeConfig: {}, adapterConfig: { model: "a", dangerouslySkipPermissions: true, extraArgs: ["--x"] } };
+    const run = overlayAgentWithSlot(agent, { id: "s", priority: 1, enabled: true, label: null, adapterType: "claude_local", aiConnection: null, adapterConfig: { model: "b" } });
+    expect(run.adapterConfig).toEqual({ model: "b", dangerouslySkipPermissions: true, extraArgs: ["--x"] });
+  });
+
   it("waits for the earliest slot when every slot is limited", async () => {
     const s = await seed();
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });

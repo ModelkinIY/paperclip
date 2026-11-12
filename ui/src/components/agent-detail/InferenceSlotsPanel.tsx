@@ -3,7 +3,7 @@
  * Slot 1 is the agent's own adapter (edited in the form above); the rest are
  * fallbacks tried in order when a slot hits its provider limit.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Plus, Trash2 } from "lucide-react";
 import { aiRuntimeConnectionBindingSchema, type AgentInferenceSlotInput, type AiRuntimeConnectionBinding } from "@paperclipai/shared";
@@ -99,17 +99,18 @@ function ModelInput({ companyId, adapterType, value, onChange }: { companyId: st
 export function InferenceSlotsPanel({ agent, companyId }: { agent: { id: string; name: string }; companyId: string }) {
   const queryClient = useQueryClient();
   const queryKey = ["agent-inference-slots", agent.id];
-  const { data, error } = useQuery({ queryKey, queryFn: () => inferenceSlotsApi.list(agent.id, companyId) });
+  // No background refetch: it would throw away unsaved edits.
+  const { data, error } = useQuery({ queryKey, queryFn: () => inferenceSlotsApi.list(agent.id, companyId), refetchOnWindowFocus: false });
   const [drafts, setDrafts] = useState<Draft[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const primary = data?.slots.find((s) => s.primary);
   const fallbacks = useMemo(() => data?.slots.filter((s) => !s.primary) ?? [], [data]);
-  useEffect(() => { setDrafts(null); }, [data]);
   const current = drafts ?? fallbacks.map(toDraft);
   const dirty = drafts !== null;
 
   const onDone = (res: { slots: InferenceSlotView[] }) => {
     queryClient.setQueryData(queryKey, res);
+    setDrafts(null);
     void queryClient.invalidateQueries({ queryKey: ["agents"] });
     setProblem(null);
   };
