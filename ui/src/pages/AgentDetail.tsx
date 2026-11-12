@@ -37,6 +37,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
+import { InferenceSlotsPanel } from "../components/agent-detail/InferenceSlotsPanel";
 import { agentDisplayAdapterType, getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
@@ -1756,6 +1757,8 @@ export function ConfigurationTab({
         sectionTitles={{ adapter: "", configuration: "", environment: "" }}
         canConfigureProviderTrace={canConfigureProviderTrace}
       /> : null}
+
+      {content === "runtime" && companyId ? <InferenceSlotsPanel agent={agent} companyId={companyId} /> : null}
 
       {content === "permissions" ? <TrustPresetSection
         layout="cards"

@@ -165,6 +165,12 @@ function Details(props: {
           </div>
           <div><div className="mb-1 text-xs text-muted-foreground">Used share, recent measurements</div><Sparkline account={a} /></div>
 
+          {/* inferdyne fork: placeholder for the cache-aware soft-limit policy (separate task). */}
+          <div className="flex flex-wrap items-center gap-3">
+            <ToggleSwitch checked={false} disabled onCheckedChange={() => undefined} aria-label="Keep prompt cache warm" />
+            <span className="text-sm text-muted-foreground">Keep prompt cache warm at the pacing hold (coming soon): let a waiting task run before its cache expires, or move it to another adapter once the cache is cold</span>
+          </div>
+
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-sm">
               <span className="font-medium">Pace model</span>

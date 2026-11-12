@@ -130,6 +130,11 @@ export function LiveRunWidget({ issueId, companyId }: LiveRunWidgetProps) {
                         {aiLimitWaitLabel(run.aiLimitWait)}
                       </span>
                     ) : null}
+                    {run.inferenceSlot && run.inferenceSlot.slotId !== "primary" ? (
+                      <span data-slot="run-inference-slot" title={run.inferenceSlot.reason}>
+                        via {run.inferenceSlot.label ?? run.inferenceSlot.adapterType}{run.inferenceSlot.model ? ` · ${run.inferenceSlot.model}` : ""}
+                      </span>
+                    ) : null}
                     <span>{formatDateTime(run.startedAt ?? run.createdAt)}</span>
                   </div>
                 </div>

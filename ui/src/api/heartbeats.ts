@@ -79,6 +79,8 @@ export interface LiveRunForIssue {
   livenessState?: RunLivenessFields["livenessState"];
   /** inferdyne fork: set while a queued run waits for its AI account to get under its limit pace. */
   aiLimitWait?: AiLimitRunWait | null;
+  /** inferdyne fork: the inference slot the run was claimed on. */
+  inferenceSlot?: import("@paperclipai/shared").InferenceSlotSelection | null;
   livenessReason?: string | null;
   continuationAttempt?: number;
   lastUsefulActionAt?: string | null;
