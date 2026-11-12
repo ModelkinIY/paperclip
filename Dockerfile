@@ -129,6 +129,13 @@ RUN find runner protocol -type f -exec touch -d @0 {} + \
   && touch -d @0 rust-toolchain.toml acpx-profiles.json antigravity-distributions.json \
   && cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd
 
+# UI (vite) depends only on deps and sources (workspace packages export ./src),
+# so BuildKit builds it in parallel with the Rust runner and the server.
+FROM deps AS ui-build
+WORKDIR /app
+COPY . .
+RUN pnpm --filter @paperclipai/ui build
+
 FROM runner-build AS build
 WORKDIR /app
 COPY --from=deps /app /app
@@ -138,7 +145,7 @@ RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -ty
 # Both the browser bundle and server stamp need the source commit. Declare it
 # after the stable dependency layers, before either application build.
 ARG PAPERCLIP_BUILD_COMMIT=""
-RUN pnpm --filter @paperclipai/ui build
+COPY --from=ui-build /app/ui/dist ui/dist
 RUN pnpm --filter @paperclipai/plugin-sdk build
 # The server build runs scripts/write-build-stamp.mjs, which stamps the built
 # commit into dist/build-info.json. The build context has no .git, so the
