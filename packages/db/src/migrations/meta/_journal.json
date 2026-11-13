@@ -2976,6 +2976,13 @@
       "when": 1793944800000,
       "tag": "0426_agent_inference_slots",
       "breakpoints": true
+    },
+    {
+      "idx": 427,
+      "version": "7",
+      "when": 1794031200000,
+      "tag": "0427_company_adapters",
+      "breakpoints": true
     }
   ]
 }

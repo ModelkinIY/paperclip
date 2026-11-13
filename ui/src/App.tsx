@@ -76,6 +76,7 @@ const Dashboard = lazy(() => import("./pages/Dashboard").then((module) => ({ def
 const DashboardLive = lazy(() => import("./pages/DashboardLive").then((module) => ({ default: module.DashboardLive })));
 const Timeline = lazy(() => import("./pages/Timeline").then((module) => ({ default: module.Timeline })));
 const Companies = lazy(() => import("./pages/Companies").then((module) => ({ default: module.Companies })));
+const Adapters = lazy(() => import("./pages/Adapters").then((module) => ({ default: module.Adapters })));
 const AgentDetail = lazy(() => import("./pages/AgentDetailPage").then((module) => ({ default: module.AgentDetailPage })));
 const Projects = lazy(() => import("./pages/Projects").then((module) => ({ default: module.Projects })));
 const ProjectDetail = lazy(() => import("./pages/ProjectDetail").then((module) => ({ default: module.ProjectDetail })));
@@ -376,6 +377,8 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="approvals/pending" element={<Approvals />} />
       <Route path="approvals/all" element={<Approvals />} />
       <Route path="approvals/:approvalId" element={<ApprovalDetail />} />
+      <Route path="adapters" element={<Adapters />} />
+      <Route path="adapters/:adapterId" element={<Adapters />} />
       <Route path="activity" element={streamlinedUiEnabled ? <CompanyActivity /> : <ProductionSurface><ProductionCompanyActivity /></ProductionSurface>} />
       <Route path="activity/commentary" element={<AuditHub section="commentary" />} />
       <Route path="activity/runs" element={<AuditHub section="runs" />} />
@@ -831,6 +834,7 @@ export function App() {
           {streamlinedUiEnabled ? (
             <>
               <Route path="audit/*" element={<UnprefixedBoardRedirect />} />
+              <Route path="adapters" element={<UnprefixedBoardRedirect />} />
               <Route path="activity" element={<UnprefixedBoardRedirect />} />
               <Route path="activity/*" element={<UnprefixedBoardRedirect />} />
               <Route path="runs" element={<UnprefixedBoardRedirect />} />

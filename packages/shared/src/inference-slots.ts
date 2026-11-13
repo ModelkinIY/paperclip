@@ -1,19 +1,5 @@
 import { z } from "zod";
 
-/** inferdyne fork: one inference adapter of an agent's ordered pool. */
-export interface AgentInferenceSlot {
-  id: string;
-  agentId: string;
-  priority: number;
-  enabled: boolean;
-  label: string | null;
-  adapterType: string;
-  adapterConfig: Record<string, unknown>;
-  aiConnection: Record<string, unknown> | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 /** Live availability of a slot, as the selector sees it. */
 export type InferenceSlotState = "available" | "soft_limit" | "hard_limit" | "disabled";
 
@@ -27,20 +13,36 @@ export interface InferenceSlotStatus {
   accountName: string | null;
 }
 
-export const agentInferenceSlotInputSchema = z.object({
-  id: z.string().uuid().optional(),
-  enabled: z.boolean().default(true),
-  label: z.string().trim().max(120).nullable().optional(),
+/** Create/update a company adapter (Adapters page). */
+export const companyAdapterSaveSchema = z.object({
+  name: z.string().trim().min(1).max(120),
   adapterType: z.string().trim().min(1),
   adapterConfig: z.record(z.string(), z.unknown()).default({}),
   aiConnection: z.record(z.string(), z.unknown()).nullable().optional(),
+  defaultEnvironmentId: z.string().uuid().nullable().optional(),
 });
-/** The whole ordered list; array order is the priority. */
-export const agentInferenceSlotsSaveSchema = z.object({
-  slots: z.array(agentInferenceSlotInputSchema).max(10),
+export type CompanyAdapterSave = z.infer<typeof companyAdapterSaveSchema>;
+
+/** An agent's adapter list; array order is the priority. */
+export const agentAdapterListSaveSchema = z.object({
+  adapters: z.array(z.object({ adapterId: z.string().uuid(), enabled: z.boolean().default(true) })).min(1).max(10),
 });
-export type AgentInferenceSlotInput = z.infer<typeof agentInferenceSlotInputSchema>;
-export type AgentInferenceSlotsSave = z.infer<typeof agentInferenceSlotsSaveSchema>;
+export type AgentAdapterListSave = z.infer<typeof agentAdapterListSaveSchema>;
+
+/** A company adapter as the API returns it. */
+export interface CompanyAdapterView {
+  id: string;
+  companyId: string;
+  name: string;
+  adapterType: string;
+  adapterConfig: Record<string, unknown>;
+  aiConnection: Record<string, unknown> | null;
+  defaultEnvironmentId: string | null;
+  status: InferenceSlotStatus | null;
+  agents: Array<{ id: string; name: string; priority: number }>;
+  createdAt: string;
+  updatedAt: string;
+}
 
 /** Persisted on the run's contextSnapshot.inferenceSlot at claim time. */
 export interface InferenceSlotSelection {

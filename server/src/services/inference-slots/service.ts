@@ -1,16 +1,17 @@
 /**
  * inferdyne fork: agent inference slots.
  *
- * Storage: the agent's own adapterType/adapterConfig/runtimeConfig.aiConnection
- * is slot "primary" (priority 0, edited by the regular agent form with all its
- * checks). agent_inference_slots holds the fallback slots (priority 1..n).
- * Reordering swaps configs between rows, so nothing has to be kept in sync.
+ * Adapters are company rows (company_adapters: harness, connection, model,
+ * adapter settings, environment override). An agent lists adapters by
+ * priority in agent_inference_slots (adapter_id). For compatibility the
+ * agent's own adapterType/adapterConfig/runtimeConfig.aiConnection mirror its
+ * first enabled adapter (adapters.ts), and every run is claimed on one adapter.
  */
-import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import {
-  agentInferenceSlots, agentInferenceSlotTaskState, agentTaskSessions, agents, heartbeatRuns, inferenceExhaustions, type Db,
+  agentInferenceSlots, agentInferenceSlotTaskState, agentTaskSessions, agents, companyAdapters, heartbeatRuns, inferenceExhaustions, type Db,
 } from "@paperclipai/db";
-import { readAiLimitRunWait, readInferenceSlotSelection, type AgentInferenceSlot, type AiLimitRunWait, type InferenceSlotSelection, type InferenceSlotStatus } from "@paperclipai/shared";
+import { readAiLimitRunWait, readInferenceSlotSelection, type AiLimitRunWait, type InferenceSlotSelection, type InferenceSlotStatus } from "@paperclipai/shared";
 import { logger } from "../../middleware/logger.js";
 import { resolveBindingAccountCandidates } from "../account-capacity/gate.js";
 import { accountCapacity } from "../account-capacity/runtime.js";
@@ -20,9 +21,13 @@ import { selectInferenceSlot, waitAtSoftLimit, type SoftLimitPolicy, type TaskAf
 export const PRIMARY_SLOT_ID = "primary";
 
 type AgentRow = typeof agents.$inferSelect;
-type SlotRow = typeof agentInferenceSlots.$inferSelect;
+type AdapterRow = typeof companyAdapters.$inferSelect;
 
-/** A slot as the run uses it: the primary is the agent's own fields. */
+/**
+ * A slot as the run uses it. With company adapters the slot id is the adapter
+ * id (stable across reordering). "primary" is an agent without an adapter list
+ * (not yet backfilled): its own fields.
+ */
 export interface ResolvedSlot {
   id: string;
   priority: number;
@@ -31,6 +36,8 @@ export interface ResolvedSlot {
   adapterType: string;
   adapterConfig: Record<string, unknown>;
   aiConnection: Record<string, unknown> | null;
+  /** Environment override of the adapter; undefined keeps the agent's. */
+  defaultEnvironmentId?: string | null;
 }
 
 export function primarySlotOf(agent: Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig">): ResolvedSlot {
@@ -42,61 +49,58 @@ export function primarySlotOf(agent: Pick<AgentRow, "adapterType" | "adapterConf
   };
 }
 
-function fromRow(row: SlotRow): ResolvedSlot {
-  return {
-    id: row.id, priority: row.priority, enabled: row.enabled, label: row.label,
-    adapterType: row.adapterType, adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null,
-  };
-}
-
-export function slotRowToApi(row: SlotRow): AgentInferenceSlot {
-  return { ...fromRow(row), agentId: row.agentId, createdAt: row.createdAt.toISOString(), updatedAt: row.updatedAt.toISOString() };
-}
-
 /**
- * Keys of adapterConfig that belong to the agent, not to the inference adapter:
- * instructions, prompts, working directory, skills sync, timeouts. A slot run
- * always takes them from the agent.
+ * Keys of adapterConfig that belong to the agent, not to the adapter:
+ * instructions, prompts, skills sync, timeouts and the agent's environment
+ * variables. Everything else (cwd, model, effort, engine, permissions, turns,
+ * command, args...) is the adapter's.
  */
 export const AGENT_LEVEL_ADAPTER_KEYS = [
   "instructionsBundleMode", "instructionsRootPath", "instructionsEntryFile", "instructionsFilePath", "agentsMdPath",
-  "promptTemplate", "bootstrapPromptTemplate", "cwd", "paperclipSkillSync", "timeoutSec", "graceSec",
+  "promptTemplate", "bootstrapPromptTemplate", "paperclipSkillSync", "timeoutSec", "graceSec", "env",
 ] as const;
-/** Env keys that pick the provider/endpoint/credentials: only the slot sets them. */
-const PROVIDER_ENV_RE = /^(ANTHROPIC_|CLAUDE_|OPENAI_|CODEX_|OPENROUTER_|XAI_|GEMINI_|GOOGLE_API)/;
+/** Env keys that pick provider/endpoint/credentials. A managed connection supplies them, so the agent's are dropped then. */
+const PROVIDER_ENV_RE = /^(ANTHROPIC_|OPENAI_|CODEX_|OPENROUTER_|XAI_|GEMINI_|GOOGLE_API|CLAUDE_CODE_USE_)/;
 
 function recordOf(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 }
 
-/** adapterConfig a run on `slot` uses: the slot's, plus the agent-level keys and non-provider env of the agent. */
-export function slotRunAdapterConfig(agentConfig: Record<string, unknown>, slotConfig: Record<string, unknown>, sameAdapter = false) {
-  // Same adapter: the agent's own settings (permissions, args, turn limits...) stay, the slot overrides.
-  const base = sameAdapter ? Object.fromEntries(Object.entries(agentConfig).filter(([k]) => k !== "env" && k !== "model")) : {};
-  const out: Record<string, unknown> = { ...base, ...slotConfig };
-  for (const key of AGENT_LEVEL_ADAPTER_KEYS) {
-    if (agentConfig[key] !== undefined) out[key] = agentConfig[key];
-    else delete out[key];
-  }
-  // One instructions file, whichever key this adapter reads it from.
-  const file = agentConfig.instructionsFilePath ?? agentConfig.agentsMdPath;
-  if (file !== undefined) { out.instructionsFilePath = file; out.agentsMdPath = file; }
-  const agentEnv = recordOf(agentConfig.env);
-  const env: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(agentEnv)) if (!PROVIDER_ENV_RE.test(k)) env[k] = v;
-  Object.assign(env, recordOf(slotConfig.env));
-  if (Object.keys(env).length) out.env = env; else delete out.env;
+export function adapterLevelConfig(config: Record<string, unknown>) {
+  const out = { ...config };
+  for (const key of AGENT_LEVEL_ADAPTER_KEYS) delete out[key];
   return out;
 }
 
-/** The agent as a run on `slot` sees it: adapter fields come from the slot, everything else stays. */
-export function overlayAgentWithSlot<T extends Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig">>(agent: T, slot: ResolvedSlot): T {
+/**
+ * adapterConfig of a run on an adapter: the adapter's keys plus the agent's
+ * own keys. With a managed AI connection the agent's provider env is dropped,
+ * so e.g. a local ANTHROPIC_BASE_URL never reaches a cloud subscription.
+ */
+export function slotRunAdapterConfig(agentConfig: Record<string, unknown>, adapterConfig: Record<string, unknown>, managedConnection: boolean) {
+  const out: Record<string, unknown> = adapterLevelConfig(adapterConfig);
+  for (const key of AGENT_LEVEL_ADAPTER_KEYS) if (agentConfig[key] !== undefined) out[key] = agentConfig[key];
+  // One instructions file, whichever key this adapter reads it from.
+  const file = agentConfig.instructionsFilePath ?? agentConfig.agentsMdPath;
+  if (file !== undefined) { out.instructionsFilePath = file; out.agentsMdPath = file; }
+  if (managedConnection) {
+    const env = Object.fromEntries(Object.entries(recordOf(agentConfig.env)).filter(([k]) => !PROVIDER_ENV_RE.test(k)));
+    if (Object.keys(env).length) out.env = env; else delete out.env;
+  }
+  return out;
+}
+
+/** The agent as a run on `slot` sees it: adapter fields come from the adapter, everything else stays. */
+export function overlayAgentWithSlot<T extends Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">>(agent: T, slot: ResolvedSlot): T {
   if (slot.id === PRIMARY_SLOT_ID) return agent;
   const runtimeConfig = { ...((agent.runtimeConfig ?? {}) as Record<string, unknown>) };
   if (slot.aiConnection) runtimeConfig.aiConnection = slot.aiConnection;
   else delete runtimeConfig.aiConnection;
-  const adapterConfig = slotRunAdapterConfig(recordOf(agent.adapterConfig), slot.adapterConfig, slot.adapterType === agent.adapterType);
-  return { ...agent, adapterType: slot.adapterType, adapterConfig, runtimeConfig };
+  const adapterConfig = slotRunAdapterConfig(recordOf(agent.adapterConfig), slot.adapterConfig, !!slot.aiConnection);
+  return {
+    ...agent, adapterType: slot.adapterType, adapterConfig, runtimeConfig,
+    ...(slot.defaultEnvironmentId !== undefined ? { defaultEnvironmentId: slot.defaultEnvironmentId } : {}),
+  };
 }
 
 /** Exhaustion key: the account when the slot has one, else the slot itself. */
@@ -109,60 +113,40 @@ function slotModel(slot: ResolvedSlot): string | null {
   return typeof m === "string" && m ? m : null;
 }
 
+function adapterSlot(row: AdapterRow, priority: number, enabled: boolean): ResolvedSlot {
+  return {
+    id: row.id, priority, enabled, label: row.name, adapterType: row.adapterType,
+    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? null,
+  };
+}
+
 export function inferenceSlotService(db: Db) {
-  async function listFallbacks(agentId: string): Promise<SlotRow[]> {
-    return db.select().from(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agentId))
+  /** The agent's adapters by priority (new-style rows only). */
+  async function listAgentAdapters(agentId: string) {
+    return db.select({ slot: agentInferenceSlots, adapter: companyAdapters }).from(agentInferenceSlots)
+      .innerJoin(companyAdapters, eq(companyAdapters.id, agentInferenceSlots.adapterId))
+      .where(eq(agentInferenceSlots.agentId, agentId))
       .orderBy(asc(agentInferenceSlots.priority), asc(agentInferenceSlots.createdAt));
   }
 
-  async function hasFallbacks(agentId: string): Promise<boolean> {
+  /** True when the agent runs from its adapter list (the gate picks a slot). */
+  async function usesAdapters(agentId: string): Promise<boolean> {
     const [row] = await db.select({ id: agentInferenceSlots.id }).from(agentInferenceSlots)
-      .where(eq(agentInferenceSlots.agentId, agentId)).limit(1);
+      .where(and(eq(agentInferenceSlots.agentId, agentId), isNotNull(agentInferenceSlots.adapterId))).limit(1);
     return !!row;
+  }
+
+  async function allSlots(agent: AgentRow): Promise<ResolvedSlot[]> {
+    const rows = await listAgentAdapters(agent.id);
+    if (!rows.length) return [primarySlotOf(agent)];
+    return rows.map((r, i) => adapterSlot(r.adapter, i, r.slot.enabled));
   }
 
   async function resolveSlot(agent: AgentRow, slotId: string): Promise<ResolvedSlot | null> {
     if (slotId === PRIMARY_SLOT_ID) return primarySlotOf(agent);
-    const [row] = await db.select().from(agentInferenceSlots)
-      .where(and(eq(agentInferenceSlots.id, slotId), eq(agentInferenceSlots.agentId, agent.id))).limit(1);
-    return row ? fromRow(row) : null;
+    return (await allSlots(agent)).find((s) => s.id === slotId) ?? null;
   }
 
-  /**
-   * Replace the fallback list; array order is the priority (1..n). Inputs are
-   * already validated and normalized by the route. Rows with an id are updated
-   * in place (keeps task affinity), others are created, missing ones removed.
-   */
-  async function replaceFallbacks(companyId: string, agentId: string, slots: Array<Omit<ResolvedSlot, "priority" | "id"> & { id?: string }>) {
-    return db.transaction(async (tx) => {
-      const keepIds = slots.map((s) => s.id).filter((id): id is string => !!id);
-      const removed = await tx.delete(agentInferenceSlots).where(and(
-        eq(agentInferenceSlots.agentId, agentId),
-        ...(keepIds.length ? [notInArray(agentInferenceSlots.id, keepIds)] : []),
-      )).returning({ id: agentInferenceSlots.id });
-      if (removed.length) {
-        await tx.delete(agentInferenceSlotTaskState).where(and(
-          eq(agentInferenceSlotTaskState.agentId, agentId), inArray(agentInferenceSlotTaskState.slotId, removed.map((r) => r.id))));
-      }
-      const now = new Date();
-      for (const [i, s] of slots.entries()) {
-        const values = {
-          priority: i + 1, enabled: s.enabled, label: s.label ?? null, adapterType: s.adapterType,
-          adapterConfig: s.adapterConfig, aiConnection: s.aiConnection ?? null, updatedAt: now,
-        };
-        if (s.id) {
-          const [updated] = await tx.update(agentInferenceSlots).set(values)
-            .where(and(eq(agentInferenceSlots.id, s.id), eq(agentInferenceSlots.agentId, agentId))).returning({ id: agentInferenceSlots.id });
-          if (updated) continue;
-        }
-        await tx.insert(agentInferenceSlots).values({ companyId, agentId, ...values });
-      }
-      return tx.select().from(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agentId))
-        .orderBy(asc(agentInferenceSlots.priority));
-    });
-  }
-
-  /** Task affinity: the slot the task ran on; a task with a session but no row ran on the primary. */
   async function getAffinity(agentId: string, taskKey: string, primaryAdapterType?: string): Promise<TaskAffinity | null> {
     const [row] = await db.select().from(agentInferenceSlotTaskState).where(and(
       eq(agentInferenceSlotTaskState.agentId, agentId), eq(agentInferenceSlotTaskState.taskKey, taskKey))).limit(1);
@@ -241,35 +225,9 @@ export function inferenceSlotService(db: Db) {
     return { statuses, accounts };
   }
 
-  /**
-   * After a promote the configs moved between "primary" and `slotId`: move task
-   * affinity and slot-keyed hard limits with them, and drop the slot choice of
-   * runs that are still queued (they pick again at claim).
-   */
-  async function followPromotedConfigs(agentId: string, slotId: string) {
-    await db.transaction(async (tx) => {
-      await tx.execute(sql`
-        UPDATE agent_inference_slot_task_state
-        SET slot_id = CASE WHEN slot_id = ${PRIMARY_SLOT_ID} THEN ${slotId} ELSE ${PRIMARY_SLOT_ID} END, updated_at = now()
-        WHERE agent_id = ${agentId} AND slot_id IN (${PRIMARY_SLOT_ID}, ${slotId})`);
-      const a = `slot:${agentId}:${PRIMARY_SLOT_ID}`, b = `slot:${agentId}:${slotId}`, tmp = `slot:${agentId}:swap`;
-      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${tmp} WHERE key = ${a}`);
-      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${a} WHERE key = ${b}`);
-      await tx.execute(sql`UPDATE inference_exhaustions SET key = ${b} WHERE key = ${tmp}`);
-      await tx.execute(sql`
-        UPDATE heartbeat_runs SET context_snapshot = context_snapshot - 'inferenceSlot'
-        WHERE agent_id = ${agentId} AND status = 'queued' AND started_at IS NULL
-          AND jsonb_typeof(context_snapshot) = 'object' AND jsonb_exists(context_snapshot, 'inferenceSlot')`);
-    });
-  }
-
-  async function allSlots(agent: AgentRow): Promise<ResolvedSlot[]> {
-    return [primarySlotOf(agent), ...(await listFallbacks(agent.id)).map(fromRow)];
-  }
-
   return {
-    listFallbacks, hasFallbacks, resolveSlot, replaceFallbacks, getAffinity, setAffinity, resetTaskSessions,
-    recordExhaustion, slotStatuses, allSlots, followPromotedConfigs,
+    listAgentAdapters, usesAdapters, allSlots, resolveSlot, getAffinity, setAffinity, resetTaskSessions,
+    recordExhaustion, slotStatuses,
   };
 }
 
@@ -322,7 +280,7 @@ export function createInferenceSlotGate(db: Db, deps: {
       }
       let slots: ResolvedSlot[];
       try {
-        if (!(await svc.hasFallbacks(agent.id))) return legacyOutcome(run, (await deps.legacy(run)) ? "legacy" : null);
+        if (!(await svc.usesAdapters(agent.id))) return legacyOutcome(run, (await deps.legacy(run)) ? "legacy" : null);
         slots = await svc.allSlots(agent);
       } catch (err) {
         logger.warn({ err, runId: run.id }, "inference slots: lookup failed; using the agent's own adapter");
@@ -399,23 +357,13 @@ export async function hasOpenFallbackSlot(db: Db, failedRunId: string) {
   if (!run) return false;
   const input = { ...run, failedRunContext: run.contextSnapshot };
   const svc = inferenceSlotService(db);
-  if (!(await svc.hasFallbacks(input.agentId))) return false;
+  if (!(await svc.usesAdapters(input.agentId))) return false;
   const [agent] = await db.select().from(agents).where(eq(agents.id, input.agentId)).limit(1);
   if (!agent) return false;
   const failedSlot = readInferenceSlotSelection(input.failedRunContext)?.slotId ?? PRIMARY_SLOT_ID;
   const slots = await svc.allSlots(agent);
   const { statuses } = await svc.slotStatuses({ companyId: input.companyId, agentId: input.agentId, responsibleUserId: input.responsibleUserId, slots, store: accountCapacity, now: new Date() });
   return slots.some((s) => s.id !== failedSlot && statuses.get(s.id)?.state === "available");
-}
-
-/** The primary's adapterConfig as a fallback slot keeps it: without agent-level keys, env reduced to provider keys. */
-export function slotConfigFromAgentConfig(agentConfig: Record<string, unknown>) {
-  const out: Record<string, unknown> = { ...agentConfig };
-  for (const key of AGENT_LEVEL_ADAPTER_KEYS) delete out[key];
-  const env: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(recordOf(agentConfig.env))) if (PROVIDER_ENV_RE.test(k)) env[k] = v;
-  if (Object.keys(env).length) out.env = env; else delete out.env;
-  return out;
 }
 
 /**
@@ -436,7 +384,7 @@ export async function applySlotSelectionAtStart<T extends AgentRow>(db: Db, inpu
   let agent = input.agent;
   if (selection.slotId !== PRIMARY_SLOT_ID) {
     const slot = await svc.resolveSlot(input.agent, selection.slotId);
-    if (!slot) throw new Error("The inference slot this run was claimed on was removed; start a new turn.");
+    if (!slot) throw new Error("The adapter this run was claimed on was removed from the agent; start a new turn.");
     agent = overlayAgentWithSlot(input.agent, slot);
   }
   if (input.taskKey) {

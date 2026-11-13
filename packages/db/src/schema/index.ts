@@ -230,7 +230,7 @@ export { chatGitHubConfigurations, chatGitHubRegistrations, chatGitHubReviews } 
 export { aiConnectionDefaults } from "./ai_connection_defaults.js";
 export { aiProviderDefaults } from "./ai_provider_defaults.js";
 export { aiGrantLimitSettings } from "./ai_grant_limit_settings.js";
-export { agentInferenceSlots, agentInferenceSlotTaskState, inferenceExhaustions } from "./agent_inference_slots.js";
+export { agentInferenceSlots, agentInferenceSlotTaskState, inferenceExhaustions, companyAdapters } from "./agent_inference_slots.js";
 export * from "./email.js";
 export { announcementDismissals, announcementPublications } from "./announcement_dismissals.js";
 export { chatTaskHandoffs, chatCompletionDeliveries } from "./chat_completion_deliveries.js";

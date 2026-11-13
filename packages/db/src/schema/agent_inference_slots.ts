@@ -8,6 +8,27 @@ import { agents } from "./agents.js";
  * the agent's adapterType/adapterConfig/runtimeConfig.aiConnection mirror the
  * first slot by priority, and each run picks a slot at claim time.
  */
+/**
+ * inferdyne fork: a company-level inference adapter (harness + connection +
+ * model + adapter settings + environment override). Agents reference adapters
+ * by priority through agent_inference_slots.adapter_id.
+ */
+export const companyAdapters = pgTable("company_adapters", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  adapterType: text("adapter_type").notNull(),
+  /** Adapter-level adapterConfig keys only; agent-level keys (instructions, prompts, env, skills) stay on the agent. */
+  adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
+  aiConnection: jsonb("ai_connection").$type<Record<string, unknown> | null>(),
+  defaultEnvironmentId: uuid("default_environment_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("company_adapters_company_name_uq").on(t.companyId, t.name),
+  index("company_adapters_company_idx").on(t.companyId),
+]);
+
 export const agentInferenceSlots = pgTable("agent_inference_slots", {
   id: uuid("id").primaryKey().defaultRandom(),
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
@@ -16,7 +37,9 @@ export const agentInferenceSlots = pgTable("agent_inference_slots", {
   priority: integer("priority").notNull(),
   enabled: boolean("enabled").notNull().default(true),
   label: text("label"),
-  adapterType: text("adapter_type").notNull(),
+  /** Company adapter this slot runs (new style). Null: legacy inline slot. */
+  adapterId: uuid("adapter_id").references(() => companyAdapters.id, { onDelete: "restrict" }),
+  adapterType: text("adapter_type"),
   adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
   /** runtimeConfig.aiConnection for this slot; null means none (self-managed auth). */
   aiConnection: jsonb("ai_connection").$type<Record<string, unknown> | null>(),

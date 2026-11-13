@@ -15,6 +15,7 @@ import {
   Boxes,
   Repeat,
   Cpu,
+  Cable,
   Layers,
   GitBranch,
   Package,
@@ -286,6 +287,7 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
             <SidebarNavItem to="/agents" label="Agents" icon={Users} />
             <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
             <SidebarNavItem to="/apps" label="Connectors" icon={Unplug} />
+            <SidebarNavItem to="/adapters" label="Adapters" icon={Cable} />
             <SidebarNavItem to="/activity" label="Audit" icon={History} />
           </SidebarSection>
         ) : null}

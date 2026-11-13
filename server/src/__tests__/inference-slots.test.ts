@@ -5,15 +5,14 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import {
-  agentInferenceSlotTaskState, agentTaskSessions, agents, agentWakeupRequests, companies, companyMemberships, createDb,
+  agentInferenceSlots, agentInferenceSlotTaskState, agentTaskSessions, agents, agentWakeupRequests, companies, companyAdapters, companyMemberships, createDb,
   heartbeatRuns, inferenceExhaustions, toolConnections,
 } from "@paperclipai/db";
 import { readAiLimitRunWait, readInferenceSlotSelection } from "@paperclipai/shared";
 import { aiConnectionService } from "../services/ai-connections.js";
 import { DEFAULT_LIMIT_SETTINGS, accountCapacity, limitSettingsStore, type Observation } from "../services/account-capacity/index.js";
-import {
-  inferenceSlotService, overlayAgentWithSlot, recordInferenceHardLimit, slotConfigFromAgentConfig, PRIMARY_SLOT_ID,
-} from "../services/inference-slots/service.js";
+import { inferenceSlotService, overlayAgentWithSlot, recordInferenceHardLimit, slotRunAdapterConfig } from "../services/inference-slots/service.js";
+import { AdapterInUseError, companyAdapterService } from "../services/inference-slots/adapters.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -83,7 +82,11 @@ describeDb("inference slots", () => {
     return { ...acct, binding: { provider: "anthropic", method: "subscription", mode: "shared", connectionId: acct.connectionId, grantId: acct.grantId } };
   }
 
-  /** Agent on account A (primary, model "primary-model") with a fallback slot without account (model "fallback-model"). */
+  /**
+   * Agent with two company adapters: "cloud" (codex_local on account A, model
+   * primary-model) first and "local" (claude_local, no account, model
+   * fallback-model) second.
+   */
   async function seed() {
     const companyId = randomUUID();
     const userId = randomUUID();
@@ -92,14 +95,14 @@ describeDb("inference slots", () => {
     const a = await account(companyId, userId, `A${n}`);
     const [agent] = await db.insert(agents).values({
       companyId, name: "Slotted", role: "engineer", status: "idle", adapterType: "codex_local",
-      adapterConfig: { model: "primary-model", instructionsFilePath: "/agent/AGENTS.md", env: { GH_TOKEN: { type: "plain", value: "gh" }, ANTHROPIC_BASE_URL: { type: "plain", value: "https://cloud" } } },
+      adapterConfig: { model: "primary-model", instructionsFilePath: "/agent/AGENTS.md", env: { GH_TOKEN: { type: "plain", value: "gh" } } },
       runtimeConfig: { aiConnection: a.binding, heartbeat: { enabled: true, intervalSec: 60, wakeOnDemand: true, maxConcurrentRuns: 3 } },
       permissions: {},
     }).returning();
-    const slots = await inferenceSlotService(db).replaceFallbacks(companyId, agent!.id, [{
-      enabled: true, label: "local", adapterType: "claude_local",
-      adapterConfig: { model: "fallback-model", env: { ANTHROPIC_BASE_URL: { type: "plain", value: "http://local" } } }, aiConnection: null,
-    }]);
+    const adapters = companyAdapterService(db);
+    const cloud = await adapters.create(companyId, { name: "cloud", adapterType: "codex_local", adapterConfig: { model: "primary-model" }, aiConnection: a.binding, defaultEnvironmentId: null });
+    const local = await adapters.create(companyId, { name: "local", adapterType: "claude_local", adapterConfig: { model: "fallback-model" }, aiConnection: null, defaultEnvironmentId: null });
+    await adapters.setAgentList(companyId, agent!.id, [{ adapterId: cloud.id, enabled: true }, { adapterId: local.id, enabled: true }]);
     const queuedRun = async (taskKey: string | null = null) => {
       const runId = randomUUID();
       const wakeupRequestId = randomUUID();
@@ -114,52 +117,93 @@ describeDb("inference slots", () => {
       return runId;
     };
     const runRow = async (id: string) => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)))[0]!;
+    const agentRow = async () => (await db.select().from(agents).where(eq(agents.id, agent!.id)))[0]!;
     const drain = async () => { await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions(); };
-    return { companyId, userId, agent: agent!, a, fallback: slots[0]!, queuedRun, runRow, drain };
+    return { companyId, userId, agent: agent!, a, cloud, local, adapters, queuedRun, runRow, agentRow, drain };
   }
 
-  it("a slot run keeps the agent's instructions and non-provider env, and takes provider env from the slot", () => {
+  it("a run on an adapter keeps the agent's instructions and env; a managed connection drops the agent's provider env", () => {
     const agent = {
-      adapterType: "codex_local", runtimeConfig: { aiConnection: { mode: "shared" }, heartbeat: { enabled: true } },
-      adapterConfig: { model: "x", instructionsFilePath: "/a.md", cwd: "/w", env: { GH: 1, ANTHROPIC_BASE_URL: "cloud" } },
+      adapterType: "codex_local", defaultEnvironmentId: "env-agent", runtimeConfig: { aiConnection: { mode: "shared" }, heartbeat: { enabled: true } },
+      adapterConfig: { model: "x", cwd: "/w", instructionsFilePath: "/a.md", env: { GH: 1, ANTHROPIC_BASE_URL: "local", ANTHROPIC_MODEL: "qwen", CLAUDE_CONFIG_DIR: "/c" } },
     };
-    const run = overlayAgentWithSlot(agent, {
-      id: "s", priority: 1, enabled: true, label: null, adapterType: "claude_local", aiConnection: null,
-      adapterConfig: { model: "y", cwd: "/elsewhere", env: { ANTHROPIC_BASE_URL: "local" } },
+    const managed = overlayAgentWithSlot(agent, {
+      id: "s", priority: 1, enabled: true, label: null, adapterType: "claude_local", aiConnection: { mode: "shared", grantId: "g" },
+      adapterConfig: { model: "y", cwd: "/elsewhere", dangerouslySkipPermissions: true, env: { IGNORED: 1 } }, defaultEnvironmentId: "env-adapter",
     });
-    expect(run.adapterType).toBe("claude_local");
-    expect(run.adapterConfig).toEqual({ model: "y", instructionsFilePath: "/a.md", agentsMdPath: "/a.md", cwd: "/w", env: { GH: 1, ANTHROPIC_BASE_URL: "local" } });
-    expect(run.runtimeConfig).toEqual({ heartbeat: { enabled: true } });
-    expect(slotConfigFromAgentConfig(agent.adapterConfig)).toEqual({ model: "x", env: { ANTHROPIC_BASE_URL: "cloud" } });
+    expect(managed.adapterType).toBe("claude_local");
+    expect(managed.defaultEnvironmentId).toBe("env-adapter");
+    expect(managed.adapterConfig).toEqual({ model: "y", cwd: "/elsewhere", dangerouslySkipPermissions: true, instructionsFilePath: "/a.md", agentsMdPath: "/a.md", env: { GH: 1, CLAUDE_CONFIG_DIR: "/c" } });
+    expect(managed.runtimeConfig).toEqual({ aiConnection: { mode: "shared", grantId: "g" }, heartbeat: { enabled: true } });
+    // Self-managed adapter (no connection): the agent's env stays whole.
+    expect(slotRunAdapterConfig(agent.adapterConfig, { model: "z" }, false).env).toEqual(agent.adapterConfig.env);
   });
 
-  it("runs on the primary while it is available", async () => {
+  it("backfill turns agents' own settings into shared company adapters and converts legacy inline slots", async () => {
+    const companyId = randomUUID();
+    const userId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Backfill Co", issuePrefix: `BF${++n}`, defaultResponsibleUserId: userId });
+    const cfg = { model: "sonnet", cwd: "/w", dangerouslySkipPermissions: true, instructionsFilePath: "/x.md", env: { A: { type: "plain", value: "1" } } };
+    const [one] = await db.insert(agents).values({ companyId, name: "One", role: "engineer", status: "idle", adapterType: "claude_local", adapterConfig: cfg, runtimeConfig: {}, permissions: {} }).returning();
+    const [two] = await db.insert(agents).values({ companyId, name: "Two", role: "engineer", status: "idle", adapterType: "claude_local", adapterConfig: { ...cfg, instructionsFilePath: "/y.md" }, runtimeConfig: {}, permissions: {} }).returning();
+    await db.insert(agentInferenceSlots).values({ companyId, agentId: two!.id, priority: 1, enabled: false, label: "qwen", adapterType: "claude_local", adapterConfig: { model: "qwen" }, aiConnection: null });
+    const svc = companyAdapterService(db);
+    expect(await svc.backfillAll()).toBeGreaterThanOrEqual(2);
+    const rows = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId));
+    expect(rows.map((r) => r.name).sort()).toEqual(["Claude Code · sonnet · own auth", "qwen"]);
+    const shared = rows.find((r) => r.name.startsWith("Claude Code"))!;
+    expect(shared.adapterConfig).toEqual({ model: "sonnet", cwd: "/w", dangerouslySkipPermissions: true });
+    expect((await svc.agentList(one!.id)).map((r) => [r.adapter.name, r.enabled])).toEqual([[shared.name, true]]);
+    expect((await svc.agentList(two!.id)).map((r) => [r.adapter.name, r.enabled])).toEqual([[shared.name, true], ["qwen", false]]);
+    expect(await svc.backfillAll()).toBe(0); // idempotent
+  });
+
+  it("the agent's own fields mirror its first enabled adapter; editing the adapter updates them", async () => {
+    const s = await seed();
+    expect((await s.agentRow()).adapterType).toBe("codex_local");
+    await s.adapters.setAgentList(s.companyId, s.agent.id, [{ adapterId: s.cloud.id, enabled: false }, { adapterId: s.local.id, enabled: true }]);
+    let row = await s.agentRow();
+    expect(row.adapterType).toBe("claude_local");
+    expect(row.adapterConfig).toMatchObject({ model: "fallback-model", instructionsFilePath: "/agent/AGENTS.md", env: { GH_TOKEN: { type: "plain", value: "gh" } } });
+    expect((row.runtimeConfig as Record<string, unknown>).aiConnection).toBeUndefined();
+    await s.adapters.update(s.companyId, s.local.id, { name: "local", adapterType: "claude_local", adapterConfig: { model: "qwen" }, aiConnection: null, defaultEnvironmentId: null });
+    row = await s.agentRow();
+    expect((row.adapterConfig as Record<string, unknown>).model).toBe("qwen");
+  });
+
+  it("an adapter in use cannot be deleted", async () => {
+    const s = await seed();
+    await expect(s.adapters.remove(s.companyId, s.local.id)).rejects.toBeInstanceOf(AdapterInUseError);
+    await s.adapters.setAgentList(s.companyId, s.agent.id, [{ adapterId: s.cloud.id, enabled: true }]);
+    expect(await s.adapters.remove(s.companyId, s.local.id)).toBe(true);
+  });
+
+  it("runs on the first adapter while it is available", async () => {
     const s = await seed();
     const id = await s.queuedRun("task-1");
     await s.drain();
     const run = await s.runRow(id);
-    expect(run.status).not.toBe("queued");
-    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: PRIMARY_SLOT_ID, reason: "priority" });
-    // The fixture account cannot really serve codex; what matters is that the primary was dispatched.
+    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.cloud.id, label: "cloud", reason: "priority" });
     expect((run.runnerProfileJson as Record<string, any>).adapterDispatch.adapterType).toBe("codex_local");
-    expect(executed.every((e) => e.adapterType === "codex_local")).toBe(true);
   });
 
-  it("a new task skips a primary at its soft limit and runs on the fallback's adapter", async () => {
+  it("a new task skips an adapter at its soft limit and runs on the next one", async () => {
     const s = await seed();
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });
     accountCapacity.record(s.a.grantId, weekly(45, 40));
     const id = await s.queuedRun("task-2");
     await s.drain();
     const run = await s.runRow(id);
-    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.fallback.id, adapterType: "claude_local", model: "fallback-model" });
+    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.local.id, adapterType: "claude_local", model: "fallback-model" });
     expect((run.runnerProfileJson as Record<string, any>).adapterDispatch.adapterType).toBe("claude_local");
     expect(executed).toEqual([{ adapterType: "claude_local", model: "fallback-model" }]);
+    const [aff] = await db.select().from(agentInferenceSlotTaskState).where(eq(agentInferenceSlotTaskState.taskKey, "task-2"));
+    expect(aff!.slotId).toBe(s.local.id);
   });
 
-  it("a task with a session on the primary waits at the soft limit instead of switching", async () => {
+  it("a task that ran on an adapter waits at its soft limit instead of switching", async () => {
     const s = await seed();
-    await db.insert(agentTaskSessions).values({ companyId: s.companyId, agentId: s.agent.id, adapterType: "codex_local", taskKey: "task-3", sessionParamsJson: {}, sessionDisplayId: "sess" });
+    await inferenceSlotService(db).setAffinity(s.companyId, s.agent.id, "task-3", s.cloud.id, randomUUID());
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });
     accountCapacity.record(s.a.grantId, weekly(45, 40));
     const id = await s.queuedRun("task-3");
@@ -170,11 +214,12 @@ describeDb("inference slots", () => {
     expect(executed).toEqual([]);
   });
 
-  it("a hard limit on the primary moves the task to the fallback and drops the old session", async () => {
+  it("a hard limit moves the task to the next adapter and drops the old session", async () => {
     const s = await seed();
+    await inferenceSlotService(db).setAffinity(s.companyId, s.agent.id, "task-4", s.cloud.id, randomUUID());
     await db.insert(agentTaskSessions).values({ companyId: s.companyId, agentId: s.agent.id, adapterType: "codex_local", taskKey: "task-4", sessionParamsJson: {}, sessionDisplayId: "sess" });
     await recordInferenceHardLimit(db, {
-      run: { id: randomUUID(), companyId: s.companyId, agentId: s.agent.id, responsibleUserId: s.userId, contextSnapshot: {} },
+      run: { id: randomUUID(), companyId: s.companyId, agentId: s.agent.id, responsibleUserId: s.userId, contextSnapshot: { inferenceSlot: { slotId: s.cloud.id, adapterType: "codex_local" } } },
       agent: s.agent, retryNotBefore: new Date(Date.now() + 3_600_000).toISOString(), message: "You've hit your 5-hour limit",
     });
     const [ex] = await db.select().from(inferenceExhaustions).where(eq(inferenceExhaustions.companyId, s.companyId));
@@ -182,15 +227,11 @@ describeDb("inference slots", () => {
     const id = await s.queuedRun("task-4");
     await s.drain();
     const run = await s.runRow(id);
-    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.fallback.id, reason: "switched_hard_limit", previousSlotId: PRIMARY_SLOT_ID });
-    expect(executed.map((e) => e.adapterType)).toEqual(["claude_local"]);
-    const sessions = await db.select().from(agentTaskSessions).where(and(eq(agentTaskSessions.agentId, s.agent.id), eq(agentTaskSessions.adapterType, "codex_local")));
-    expect(sessions).toEqual([]);
-    const [aff] = await db.select().from(agentInferenceSlotTaskState).where(eq(agentInferenceSlotTaskState.taskKey, "task-4"));
-    expect(aff!.slotId).toBe(s.fallback.id);
+    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.local.id, reason: "switched_hard_limit", previousSlotId: s.cloud.id });
+    expect(await db.select().from(agentTaskSessions).where(and(eq(agentTaskSessions.agentId, s.agent.id), eq(agentTaskSessions.adapterType, "codex_local")))).toEqual([]);
   });
 
-  it("a provider_quota failure on a slot run records the slot exhausted", async () => {
+  it("a provider_quota failure on an adapter without an account marks that adapter exhausted", async () => {
     const s = await seed();
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });
     accountCapacity.record(s.a.grantId, weekly(45, 40));
@@ -201,49 +242,27 @@ describeDb("inference slots", () => {
     await s.queuedRun("task-5");
     await s.drain();
     const [ex] = await db.select().from(inferenceExhaustions).where(eq(inferenceExhaustions.companyId, s.companyId));
-    expect(ex!.key).toBe(`slot:${s.agent.id}:${s.fallback.id}`);
+    expect(ex!.key).toBe(`slot:${s.agent.id}:${s.local.id}`);
   });
 
-  it("a retry that carries a stale slot choice runs on the primary once the fallbacks are gone", async () => {
+  it("a retry that carries the choice of an adapter no longer on the agent goes the agent's way", async () => {
     const s = await seed();
-    await inferenceSlotService(db).replaceFallbacks(s.companyId, s.agent.id, []);
+    await s.adapters.setAgentList(s.companyId, s.agent.id, [{ adapterId: s.cloud.id, enabled: true }]);
     const id = await s.queuedRun("task-7");
-    await db.update(heartbeatRuns).set({ contextSnapshot: { taskKey: "task-7", inferenceSlot: { slotId: s.fallback.id, adapterType: "claude_local", priority: 1, label: null, model: null, reason: "priority", previousSlotId: null } } })
+    await db.update(heartbeatRuns).set({ contextSnapshot: { taskKey: "task-7", inferenceSlot: { slotId: s.local.id, adapterType: "claude_local", priority: 1, label: null, model: null, reason: "priority", previousSlotId: null } } })
       .where(eq(heartbeatRuns.id, id));
     await s.drain();
     const run = await s.runRow(id);
-    expect(readInferenceSlotSelection(run.contextSnapshot)).toBeNull();
+    expect(readInferenceSlotSelection(run.contextSnapshot)).toMatchObject({ slotId: s.cloud.id });
     expect((run.runnerProfileJson as Record<string, any>).adapterDispatch.adapterType).toBe("codex_local");
-    expect(run.error ?? "").not.toContain("inference slot");
+    expect(run.error ?? "").not.toContain("adapter this run was claimed on");
   });
 
-  it("promote moves task affinity and slot-keyed limits with the configs and drops queued choices", async () => {
-    const s = await seed();
-    const svc = inferenceSlotService(db);
-    await svc.setAffinity(s.companyId, s.agent.id, "on-primary", PRIMARY_SLOT_ID, randomUUID());
-    await svc.setAffinity(s.companyId, s.agent.id, "on-fallback", s.fallback.id, randomUUID());
-    await svc.recordExhaustion({ companyId: s.companyId, key: `slot:${s.agent.id}:${s.fallback.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
-    const queued = await s.queuedRun("q");
-    await db.update(heartbeatRuns).set({ contextSnapshot: { taskKey: "q", inferenceSlot: { slotId: s.fallback.id, adapterType: "claude_local" } } }).where(eq(heartbeatRuns.id, queued));
-    await svc.followPromotedConfigs(s.agent.id, s.fallback.id);
-    const rows = await db.select().from(agentInferenceSlotTaskState).where(eq(agentInferenceSlotTaskState.agentId, s.agent.id));
-    expect(Object.fromEntries(rows.map((r) => [r.taskKey, r.slotId]))).toEqual({ "on-primary": s.fallback.id, "on-fallback": PRIMARY_SLOT_ID });
-    const [ex] = await db.select().from(inferenceExhaustions).where(eq(inferenceExhaustions.companyId, s.companyId));
-    expect(ex!.key).toBe(`slot:${s.agent.id}:${PRIMARY_SLOT_ID}`);
-    expect(readInferenceSlotSelection((await s.runRow(queued)).contextSnapshot)).toBeNull();
-  });
-
-  it("a fallback on the same adapter keeps the agent's other adapter settings", () => {
-    const agent = { adapterType: "claude_local", runtimeConfig: {}, adapterConfig: { model: "a", dangerouslySkipPermissions: true, extraArgs: ["--x"] } };
-    const run = overlayAgentWithSlot(agent, { id: "s", priority: 1, enabled: true, label: null, adapterType: "claude_local", aiConnection: null, adapterConfig: { model: "b" } });
-    expect(run.adapterConfig).toEqual({ model: "b", dangerouslySkipPermissions: true, extraArgs: ["--x"] });
-  });
-
-  it("waits for the earliest slot when every slot is limited", async () => {
+  it("waits for the earliest adapter when every adapter is limited", async () => {
     const s = await seed();
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });
     accountCapacity.record(s.a.grantId, weekly(45, 40));
-    await inferenceSlotService(db).recordExhaustion({ companyId: s.companyId, key: `slot:${s.agent.id}:${s.fallback.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
+    await inferenceSlotService(db).recordExhaustion({ companyId: s.companyId, key: `slot:${s.agent.id}:${s.local.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
     const id = await s.queuedRun("task-6");
     await s.drain();
     const run = await s.runRow(id);

@@ -37,7 +37,7 @@ import { queryKeys } from "../lib/queryKeys";
 import { copyTextToClipboard } from "../lib/clipboard";
 import { AgentSkillsTab } from "./agent-skills/AgentSkillsTab";
 import { AgentConfigForm } from "../components/AgentConfigForm";
-import { InferenceSlotsPanel } from "../components/agent-detail/InferenceSlotsPanel";
+import { AgentAdaptersList } from "../components/agent-detail/AgentAdaptersList";
 import { agentDisplayAdapterType, getAdapterDisplay } from "../adapters/adapter-display-registry";
 import { adapterLabels, roleLabels, help } from "../components/agent-config-primitives";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
@@ -1736,6 +1736,7 @@ export function ConfigurationTab({
 
   return (
     <div className={cn("agent-settings-form", content === "permissions" ? "flex flex-col gap-(--agent-detail-module-gap)" : "space-y-6")}>
+      {content === "runtime" && companyId ? <AgentAdaptersList agentId={agent.id} companyId={companyId} /> : null}
       {content !== "permissions" ? <AgentConfigForm
         mode="edit"
         agent={agent}
@@ -1753,12 +1754,11 @@ export function ConfigurationTab({
         environmentVariablesPlacement={content === "secrets" ? "secrets" : "configuration"}
         compactTestFeedback
         sectionOrder={["adapter", "configuration", "environment", "environment-variables"]}
-        hiddenSections={["identity", "run-policy"]}
+        hiddenSections={content === "runtime" ? ["identity", "run-policy", "adapter", "configuration", "environment"] : ["identity", "run-policy"]}
         sectionTitles={{ adapter: "", configuration: "", environment: "" }}
         canConfigureProviderTrace={canConfigureProviderTrace}
       /> : null}
 
-      {content === "runtime" && companyId ? <InferenceSlotsPanel agent={agent} companyId={companyId} /> : null}
 
       {content === "permissions" ? <TrustPresetSection
         layout="cards"

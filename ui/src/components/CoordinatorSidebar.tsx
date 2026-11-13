@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Inbox, Bell, Boxes, ChevronRight, CircleCheck, FolderOpen, History, LayoutDashboard, MessageCircle, MoreHorizontal, Network, Pin, PinOff, Plus, Repeat, Search, Settings, SquarePen, Unplug } from "lucide-react";
+import { Inbox, Bell, Boxes, ChevronRight, CircleCheck, FolderOpen, History, LayoutDashboard, MessageCircle, MoreHorizontal, Network, Pin, PinOff, Plus, Repeat, Search, Settings, SquarePen, Unplug, Cable } from "lucide-react";
 import type { Project } from "@paperclipai/shared";
 import { useCoordinatorAttentionCount } from "@/hooks/useCoordinatorAttentionCount";
 import { issuesApi } from "@/api/issues";
@@ -33,6 +33,7 @@ const moreDestinations = [
   { label: "Agents", to: "/agents/all", icon: Network },
   { label: "Skills", to: "/skills", icon: Boxes },
   { label: "Connectors", to: "/apps", icon: Unplug },
+  { label: "Adapters", to: "/adapters", icon: Cable },
   { label: "Audit", to: "/activity", icon: History },
   { label: "Settings", to: "/settings", icon: Settings },
 ] as const;

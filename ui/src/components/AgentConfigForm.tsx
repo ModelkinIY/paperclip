@@ -151,6 +151,11 @@ type AgentConfigFormProps = {
   /** Optional settings composition; sorting changes DOM order as well as visual order. */
   sectionOrder?: readonly string[];
   sectionTitles?: Record<string, string>;
+  /**
+   * inferdyne fork: the form edits a company adapter (Adapters page), not an
+   * agent. `agent` is a stand-in; no agent-scoped API call is made with its id.
+   */
+  standaloneAdapter?: boolean;
 } & (
   | {
       mode: "create";
@@ -391,7 +396,9 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   });
   // Pending binding proposals targeting this agent (PAP-14731). Board-only route;
   // non-permitted viewers simply get an empty list.
-  const editAgentId = !isCreate ? props.agent.id : null;
+  const editAgentId = !isCreate && !props.standaloneAdapter ? props.agent.id : null;
+  /** Agent id for server calls: none for a company adapter. */
+  const apiAgentId = isCreate || props.standaloneAdapter ? undefined : props.agent.id;
   const { data: pendingProposals = [] } = useQuery({
     queryKey: selectedCompanyId
       ? queryKeys.secrets.proposals(selectedCompanyId, "pending")
@@ -933,7 +940,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     rawCurrentDefaultEnvironmentId, upgradeEnvironmentId, upgradeEnvironment?.config, effectiveConfig, overlay]);
   runnerSettingsTargetRef.current = runnerSettingsTarget;
   useEffect(() => () => { runnerSettingsTargetRef.current = ""; }, []);
-  const showRunnerUpgrade = !isCreate
+  const showRunnerUpgrade = !isCreate && !props.standaloneAdapter
     && ["codex_local", "claude_local", "grok_local"].includes(props.agent.adapterType)
     && adapterType === props.agent.adapterType
     && !runnerDiscovery.isError
@@ -1052,7 +1059,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       provider: modelProvider,
       acpxAgent: runnerAcpxAgent,
       aiConnection: modelAiBinding,
-      agentId: isCreate ? undefined : props.agent.id,
+      agentId: apiAgentId,
     }),
     ...(accountBoundCatalog ? ACCOUNT_BOUND_MODEL_DISCOVERY_QUERY_OPTIONS : {}),
     enabled: Boolean(selectedCompanyId) && !isExternalRunner && !connectionModels,
@@ -1093,7 +1100,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   /** Props passed to adapter-specific config field components */
   const adapterFieldProps = {
     companyId: selectedCompanyId ?? undefined,
-    agentId: isCreate ? undefined : props.agent.id,
+    agentId: apiAgentId,
     mode,
     isCreate,
     adapterType: fieldsAdapterType,
@@ -1221,11 +1228,11 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
         visibleEnvironmentIds: environmentList.map((environment) => environment.id),
       });
       const adapterConfig = buildAdapterConfigForTest(adapterConfigPatch);
-      const agentId = isCreate ? undefined : props.agent.id;
+      const agentId = apiAgentId;
       const aiConnection = isCreate ? undefined : aiRuntimeConnectionBindingSchema.safeParse(
         (overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? props.agent.runtimeConfig.aiConnection,
       ).data;
-      if (!isCreate && props.agent.adapterType === "paperclip_runner" && adapterType === "paperclip_runner"
+      if (!isCreate && !props.standaloneAdapter && props.agent.adapterType === "paperclip_runner" && adapterType === "paperclip_runner"
         && runnerAvailability?.defaultRunner !== "paperclip"
         && !isExternalRunner && aiConnection?.mode !== "router" && !isDirty && environmentId && canQualifyRunnerEnvironment(environmentList.find(environment => environment.id === environmentId))) {
         const target = runnerSettingsTargetRef.current;
@@ -1883,7 +1890,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             </Field>
           )}
 
-          {!isExternalRunner && !isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={aiRoutingHarness(adapterType, eff("adapterConfig", "provider", config.provider), eff("adapterConfig", "acpxAgent", config.acpxAgent))}
+          {!isExternalRunner && !isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={apiAgentId} agentName={props.agent.name} adapterType={aiRoutingHarness(adapterType, eff("adapterConfig", "provider", config.provider), eff("adapterConfig", "acpxAgent", config.acpxAgent))}
             routerAdapterType={adapterType} value={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
             onChange={binding => {

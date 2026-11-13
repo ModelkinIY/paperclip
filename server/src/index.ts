@@ -1,3 +1,4 @@
+import { companyAdapterService } from "./services/inference-slots/adapters.js";
 import { registerNativeCancellationDelivery } from "./services/native-runtime/native-cancellation-delivery.js";
 import { aiConnectionService } from "./services/ai-connections.js";
 import { accountCapacity, limitSettingsStore, listActiveUserMemberships, listWaitingGrantIds, tickAccountLimits } from "./services/account-capacity/index.js";
@@ -1348,6 +1349,10 @@ async function startServerWithDatabaseTeardown(
     }));
   });
   server.on("close", () => { void taskDrainExpiryWork.stop(); });
+  // inferdyne fork: agents without an adapter list get company adapters from their own settings.
+  if (!isWarmStandby()) {
+    void companyAdapterService(db as any).backfillAll().catch(err => logger.warn({ err }, "adapters backfill failed"));
+  }
   // inferdyne fork: per-account limit observations and gate (services/account-capacity).
   const accountLimitsUsage = aiConnectionService(db as any);
   let accountLimitsTickRunning = false;

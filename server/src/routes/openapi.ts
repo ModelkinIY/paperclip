@@ -1,4 +1,4 @@
-import { agentInferenceSlotsSaveSchema } from "@paperclipai/shared";
+import { companyAdapterSaveSchema, agentAdapterListSaveSchema } from "@paperclipai/shared";
 import { MUSE_ASSET_VERSION, museStopBoundarySchema, museDetectorCleanupAttestationSchema, createGrokInvitationSchema, configureGrokRoutineSchema, verifyGrokRoutineSchema, recoverGrokRoutineSchema, pairGrokBindingSchema, stopGrokWorkSchema, retryGrokDeliverySchema, updateFastResponseSchema } from "@paperclipai/shared";
 import { slackTestMessageSchema, slackTestMessageResultSchema, slackManagerAuthorizationSchema, slackSetupOptionsSchema, slackManagedProvisionSchema, slackManagedResultSchema, slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -3944,29 +3944,56 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
-  path: "/api/agents/{id}/inference-slots",
+  path: "/api/companies/{companyId}/adapters",
   tags: ["agents"],
-  summary: "List the agent's inference slots (primary first) with live limit status",
+  summary: "List company adapters with live limit status and the agents using them",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/companies/{companyId}/adapters",
+  tags: ["agents"],
+  summary: "Create a company adapter",
+  request: { params: z.object({ companyId: z.string() }), body: jsonBody(companyAdapterSaveSchema) },
+  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/api/adapters/{id}",
+  tags: ["agents"],
+  summary: "Update a company adapter (agents that run it first are updated too)",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(companyAdapterSaveSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/adapters/{id}",
+  tags: ["agents"],
+  summary: "Delete a company adapter that no agent uses",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 204: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/adapters",
+  tags: ["agents"],
+  summary: "List the agent's adapters by priority",
   request: { params: z.object({ id: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({
   method: "put",
-  path: "/api/agents/{id}/inference-slots",
+  path: "/api/agents/{id}/adapters",
   tags: ["agents"],
-  summary: "Replace the agent's fallback inference slots (array order is priority)",
-  request: { params: z.object({ id: z.string() }), body: jsonBody(agentInferenceSlotsSaveSchema) },
+  summary: "Replace the agent's adapter list (array order is priority)",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(agentAdapterListSaveSchema) },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
-});
-
-registry.registerPath({
-  method: "post",
-  path: "/api/agents/{id}/inference-slots/{slotId}/promote",
-  tags: ["agents"],
-  summary: "Swap a fallback inference slot with the agent's primary adapter",
-  request: { params: z.object({ id: z.string(), slotId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({
