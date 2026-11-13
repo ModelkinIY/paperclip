@@ -1,7 +1,7 @@
-import { inferenceSlotService, adapterLevelConfig } from "../services/inference-slots/service.js";
+import { inferenceSlotService, adapterLevelConfig, adapterConfigForAgent, sharedAdapterConfig, slotConfigFor } from "../services/inference-slots/service.js";
 import { companyAdapterService, AdapterInUseError } from "../services/inference-slots/adapters.js";
 import { accountCapacity } from "../services/account-capacity/index.js";
-import { companyAdapterSaveSchema, agentAdapterListSaveSchema, type CompanyAdapterSave, type AgentAdapterListSave } from "@paperclipai/shared";
+import { slotEffortKey, companyAdapterSaveSchema, agentAdapterListSaveSchema, type CompanyAdapterSave, type AgentAdapterListSave } from "@paperclipai/shared";
 import { readTaskPanelActivations } from "../services/plugin-task-panels.js";
 import { enqueueNativeRuntimeResponse } from "../services/native-runtime/native-runtime-response-delivery.js";
 import { latestFailedRunsByAgent } from "@paperclipai/shared";
@@ -5457,8 +5457,9 @@ export function agentRoutes(
     const adapterType = await assertSelectableAdapterType(input.adapterType, input.adapterConfig, companyId);
     // GET returns a redacted config; any redacted leaf sent back keeps the stored value.
     let config = previous ? restoreRedactedLeaves(input.adapterConfig, previous.adapterConfig) as Record<string, unknown> : input.adapterConfig;
-    config = adapterLevelConfig(config);
-    const normalized = adapterLevelConfig(await normalizeMediatedAdapterConfigForPersistence({
+    // Model and effort are picked per agent (runtime tab), not stored on the adapter.
+    config = sharedAdapterConfig(config);
+    const normalized = sharedAdapterConfig(await normalizeMediatedAdapterConfigForPersistence({
       companyId, adapterType, adapterConfig: applyCreateDefaultsByAdapterType(adapterType, config),
     }));
     let aiConnection: Record<string, unknown> | null = null;
@@ -5466,17 +5467,9 @@ export function agentRoutes(
       const binding = aiRuntimeConnectionBindingSchema.safeParse(input.aiConnection);
       if (!binding.success) throw unprocessable("Invalid AI connection for the adapter");
       if (binding.data.mode === "router") throw unprocessable("Connection pools cannot be used in an adapter; add each account as its own adapter");
-      if (!isAiConnectionCompatible(binding.data, adapterType, normalized.model, normalized.provider, normalized.acpxAgent)) {
-        throw unprocessable("Select an AI connection compatible with the adapter's harness and model");
-      }
-      if ("connectionId" in binding.data) {
-        // A gateway/API connection without a model sends the harness default (often a cloud model id) to the endpoint.
-        const [conn] = await db.select({ config: toolConnections.config }).from(toolConnections)
-          .where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.id, String((binding.data as { connectionId?: string }).connectionId ?? "")))).limit(1);
-        const routing = (conn?.config as { ai?: { routing?: { kind?: string } } } | undefined)?.ai?.routing;
-        if (routing && routing.kind !== "openrouter" && !(typeof normalized.model === "string" && normalized.model.trim())) {
-          throw unprocessable("Set a model: this connection is a custom endpoint and does not know the harness's default model");
-        }
+      // Pi checks the model against the provider: that happens when an agent picks its model.
+      if (adapterType !== "pi_local" && !isAiConnectionCompatible(binding.data, adapterType, undefined, normalized.provider, normalized.acpxAgent)) {
+        throw unprocessable("Select an AI connection compatible with the adapter's harness");
       }
       aiConnection = binding.data as Record<string, unknown>;
     }
@@ -5499,6 +5492,16 @@ export function agentRoutes(
     return requested;
   }
 
+  /** A gateway/API connection without a model sends the harness default (often a cloud model id) to the endpoint. */
+  async function connectionNeedsModel(companyId: string, aiConnection: Record<string, unknown> | null) {
+    const connectionId = aiConnection && typeof aiConnection.connectionId === "string" ? aiConnection.connectionId : null;
+    if (!connectionId) return false;
+    const [conn] = await db.select({ config: toolConnections.config }).from(toolConnections)
+      .where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.id, connectionId))).limit(1);
+    const routing = (conn?.config as { ai?: { routing?: { kind?: string } } } | undefined)?.ai?.routing;
+    return !!routing && routing.kind !== "openrouter";
+  }
+
   /** Every agent that lists the adapter must be allowed to use its connection. */
   async function assertAgentsMayUseAdapter(req: Request, companyId: string, adapterId: string, adapter: { adapterType: string; adapterConfig: Record<string, unknown>; aiConnection: Record<string, unknown> | null; defaultEnvironmentId: string | null }) {
     const binding = aiRuntimeConnectionBindingSchema.safeParse(adapter.aiConnection).data;
@@ -5507,7 +5510,9 @@ export function agentRoutes(
     for (const u of users) {
       const agent = await svc.getById(u.id);
       if (!agent) continue;
-      await validateManagedAgentBinding(req, companyId, agent.id, adapter.adapterType, adapter.adapterConfig, binding, adapter.defaultEnvironmentId ?? agent.defaultEnvironmentId, false);
+      const slot = (await adaptersSvc.agentList(agent.id)).find((x) => x.adapterId === adapterId);
+      const cfg = adapterConfigForAgent(adapter.adapterConfig, slot?.slotConfig);
+      await validateManagedAgentBinding(req, companyId, agent.id, adapter.adapterType, cfg, binding, adapter.defaultEnvironmentId ?? agent.defaultEnvironmentId, false);
     }
   }
 
@@ -5545,7 +5550,7 @@ export function agentRoutes(
     });
     const actor = getActorInfo(req);
     await logActivity(db, { companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
-      action: "adapter.created", entityType: "adapter", entityId: row.id, details: { name: row.name, adapterType: row.adapterType, model: row.adapterConfig.model ?? null } });
+      action: "adapter.created", entityType: "adapter", entityId: row.id, details: { name: row.name, adapterType: row.adapterType } });
     res.status(201).json(await adapterView(row));
   });
 
@@ -5562,7 +5567,7 @@ export function agentRoutes(
     if (!row) throw notFound("Adapter not found");
     const actor = getActorInfo(req);
     await logActivity(db, { companyId: row.companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
-      action: "adapter.updated", entityType: "adapter", entityId: row.id, details: { name: row.name, adapterType: row.adapterType, model: row.adapterConfig.model ?? null } });
+      action: "adapter.updated", entityType: "adapter", entityId: row.id, details: { name: row.name, adapterType: row.adapterType } });
     res.json(await adapterView(row));
   });
 
@@ -5607,7 +5612,15 @@ export function agentRoutes(
     // Setup drafts are converted once they are set up (first claim), not from a read.
     if (!(agent.lifecycleHolds ?? []).includes("setup")) await adaptersSvc.ensureAgentAdapters(agent);
     const list = await adaptersSvc.agentList(agent.id);
-    return { adapters: await Promise.all(list.map(async (r) => ({ ...(await adapterView(r.adapter)), enabled: r.enabled, priority: r.priority }))) };
+    return { adapters: await Promise.all(list.map(async (r) => {
+      const own = adapterConfigForAgent({}, r.slotConfig);
+      const effortKey = slotEffortKey(r.adapter.adapterType, r.adapter.adapterConfig ?? {});
+      return {
+        ...(await adapterView(r.adapter)), enabled: r.enabled, priority: r.priority,
+        model: typeof own.model === "string" ? own.model : null,
+        effort: typeof own[effortKey] === "string" ? own[effortKey] as string : null,
+      };
+    })) };
   }
 
   router.get("/agents/:id/adapters", async (req, res) => {
@@ -5632,10 +5645,17 @@ export function agentRoutes(
     for (const item of body.adapters) {
       const adapter = await adaptersSvc.get(existing.companyId, item.adapterId);
       if (!adapter) throw unprocessable("Unknown adapter");
+      const cfg = adapterConfigForAgent(adapter.adapterConfig, slotConfigFor(adapter.adapterType, adapter.adapterConfig ?? {}, item.model, item.effort));
+      if (!item.model && await connectionNeedsModel(existing.companyId, adapter.aiConnection ?? null)) {
+        throw unprocessable(`Set a model for "${adapter.name}": its connection is a custom endpoint and does not know the harness's default model`);
+      }
       const binding = aiRuntimeConnectionBindingSchema.safeParse(adapter.aiConnection).data;
       if (binding && binding.mode !== "router") {
+        if (!isAiConnectionCompatible(binding, adapter.adapterType, cfg.model, cfg.provider, cfg.acpxAgent)) {
+          throw unprocessable(`The model for "${adapter.name}" does not fit its connection`);
+        }
         // The agent must be allowed to use the adapter's connection (grant scope, installs).
-        await validateManagedAgentBinding(req, existing.companyId, existing.id, adapter.adapterType, adapter.adapterConfig ?? {}, binding, adapter.defaultEnvironmentId ?? existing.defaultEnvironmentId, false);
+        await validateManagedAgentBinding(req, existing.companyId, existing.id, adapter.adapterType, cfg, binding, adapter.defaultEnvironmentId ?? existing.defaultEnvironmentId, false);
       }
     }
     await adaptersSvc.setAgentList(existing.companyId, existing.id, body.adapters).catch((err) => {

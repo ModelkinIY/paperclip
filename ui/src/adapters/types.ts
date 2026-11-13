@@ -23,6 +23,8 @@ export interface AdapterConfigFieldsProps {
   section?: AdapterConfigSection;
   /** The shared local-adapter model picker is already rendered by the form. */
   hideModel?: boolean;
+  /** inferdyne fork: company adapter editor; agent-level fields (max turns) live on the agent. */
+  hideAgentLevel?: boolean;
   companyId?: string;
   agentId?: string;
   mode: "create" | "edit";

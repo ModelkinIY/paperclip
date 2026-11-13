@@ -100,9 +100,9 @@ describeDb("inference slots", () => {
       permissions: {},
     }).returning();
     const adapters = companyAdapterService(db);
-    const cloud = await adapters.create(companyId, { name: "cloud", adapterType: "codex_local", adapterConfig: { model: "primary-model" }, aiConnection: a.binding, defaultEnvironmentId: null });
-    const local = await adapters.create(companyId, { name: "local", adapterType: "claude_local", adapterConfig: { model: "fallback-model" }, aiConnection: null, defaultEnvironmentId: null });
-    await adapters.setAgentList(companyId, agent!.id, [{ adapterId: cloud.id, enabled: true }, { adapterId: local.id, enabled: true }]);
+    const cloud = await adapters.create(companyId, { name: "cloud", adapterType: "codex_local", adapterConfig: {}, aiConnection: a.binding, defaultEnvironmentId: null });
+    const local = await adapters.create(companyId, { name: "local", adapterType: "claude_local", adapterConfig: {}, aiConnection: null, defaultEnvironmentId: null });
+    await adapters.setAgentList(companyId, agent!.id, [{ adapterId: cloud.id, enabled: true, model: "primary-model" }, { adapterId: local.id, enabled: true, model: "fallback-model" }]);
     const queuedRun = async (taskKey: string | null = null) => {
       const runId = randomUUID();
       const wakeupRequestId = randomUUID();
@@ -133,7 +133,8 @@ describeDb("inference slots", () => {
     });
     expect(managed.adapterType).toBe("claude_local");
     expect(managed.defaultEnvironmentId).toBe("env-adapter");
-    expect(managed.adapterConfig).toEqual({ model: "y", cwd: "/elsewhere", dangerouslySkipPermissions: true, instructionsFilePath: "/a.md", agentsMdPath: "/a.md", env: { GH: 1, CLAUDE_CONFIG_DIR: "/c" } });
+    // The working directory is the agent's, not the adapter's.
+    expect(managed.adapterConfig).toEqual({ model: "y", cwd: "/w", dangerouslySkipPermissions: true, instructionsFilePath: "/a.md", agentsMdPath: "/a.md", env: { GH: 1, CLAUDE_CONFIG_DIR: "/c" } });
     expect(managed.runtimeConfig).toEqual({ aiConnection: { mode: "shared", grantId: "g" }, heartbeat: { enabled: true } });
     // Self-managed adapter (no connection): the agent's env stays whole.
     expect(slotRunAdapterConfig(agent.adapterConfig, { model: "z" }, false).env).toEqual(agent.adapterConfig.env);
@@ -150,25 +151,59 @@ describeDb("inference slots", () => {
     const svc = companyAdapterService(db);
     expect(await svc.backfillAll()).toBeGreaterThanOrEqual(2);
     const rows = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId));
-    expect(rows.map((r) => r.name).sort()).toEqual(["Claude Code · sonnet · own auth", "qwen"]);
+    expect(rows.map((r) => r.name).sort()).toEqual(["Claude Code · own auth", "qwen"]);
     const shared = rows.find((r) => r.name.startsWith("Claude Code"))!;
-    expect(shared.adapterConfig).toEqual({ model: "sonnet", cwd: "/w", dangerouslySkipPermissions: true });
-    expect((await svc.agentList(one!.id)).map((r) => [r.adapter.name, r.enabled])).toEqual([[shared.name, true]]);
-    expect((await svc.agentList(two!.id)).map((r) => [r.adapter.name, r.enabled])).toEqual([[shared.name, true], ["qwen", false]]);
+    // Model and working directory are not the adapter's: the model is on the agent's list row.
+    expect(shared.adapterConfig).toEqual({ dangerouslySkipPermissions: true });
+    expect((await svc.agentList(one!.id)).map((r) => [r.adapter.name, r.enabled, r.slotConfig])).toEqual([[shared.name, true, { model: "sonnet" }]]);
+    expect((await svc.agentList(two!.id)).map((r) => [r.adapter.name, r.enabled, r.slotConfig])).toEqual([[shared.name, true, { model: "sonnet" }], ["qwen", false, { model: "qwen" }]]);
     expect(await svc.backfillAll()).toBe(0); // idempotent
   });
 
   it("the agent's own fields mirror its first enabled adapter; editing the adapter updates them", async () => {
     const s = await seed();
     expect((await s.agentRow()).adapterType).toBe("codex_local");
-    await s.adapters.setAgentList(s.companyId, s.agent.id, [{ adapterId: s.cloud.id, enabled: false }, { adapterId: s.local.id, enabled: true }]);
+    await s.adapters.setAgentList(s.companyId, s.agent.id, [{ adapterId: s.cloud.id, enabled: false, model: "primary-model" }, { adapterId: s.local.id, enabled: true, model: "fallback-model", effort: "high" }]);
     let row = await s.agentRow();
     expect(row.adapterType).toBe("claude_local");
-    expect(row.adapterConfig).toMatchObject({ model: "fallback-model", instructionsFilePath: "/agent/AGENTS.md", env: { GH_TOKEN: { type: "plain", value: "gh" } } });
+    expect(row.adapterConfig).toMatchObject({ model: "fallback-model", effort: "high", instructionsFilePath: "/agent/AGENTS.md", env: { GH_TOKEN: { type: "plain", value: "gh" } } });
     expect((row.runtimeConfig as Record<string, unknown>).aiConnection).toBeUndefined();
-    await s.adapters.update(s.companyId, s.local.id, { name: "local", adapterType: "claude_local", adapterConfig: { model: "qwen" }, aiConnection: null, defaultEnvironmentId: null });
+    await s.adapters.update(s.companyId, s.local.id, { name: "local", adapterType: "claude_local", adapterConfig: { model: "ignored", dangerouslySkipPermissions: true }, aiConnection: null, defaultEnvironmentId: null });
     row = await s.agentRow();
-    expect((row.adapterConfig as Record<string, unknown>).model).toBe("qwen");
+    // A model sent to the adapter is not stored there; the agent's pick stays.
+    expect(row.adapterConfig).toMatchObject({ model: "fallback-model", dangerouslySkipPermissions: true });
+  });
+
+  it("consolidation moves model and effort onto agents' rows and merges adapters that differed only by them", async () => {
+    const companyId = randomUUID();
+    const userId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Merge Co", issuePrefix: `MG${++n}`, defaultResponsibleUserId: userId });
+    const mk = async (name: string, model: string, effort?: string) => {
+      const [agent] = await db.insert(agents).values({ companyId, name, role: "engineer", status: "idle", adapterType: "claude_local",
+        adapterConfig: { model, ...(effort ? { effort } : {}), cwd: `/w/${name}` }, runtimeConfig: {}, permissions: {} }).returning();
+      return agent!;
+    };
+    const one = await mk("One", "sonnet");
+    const two = await mk("Two", "opus", "high");
+    // Rows as the first release stored them: model/effort/cwd on the adapter.
+    const [sonnet] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · sonnet · own auth", adapterType: "claude_local", adapterConfig: { model: "sonnet", cwd: "/w/One", maxTurnsPerRun: 5 } }).returning();
+    const [opus] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · opus · own auth", adapterType: "claude_local", adapterConfig: { model: "opus", effort: "high", cwd: "/w/Two" } }).returning();
+    await db.insert(agentInferenceSlots).values([
+      { companyId, agentId: one.id, priority: 0, adapterId: sonnet!.id },
+      { companyId, agentId: two.id, priority: 0, adapterId: opus!.id },
+      { companyId, agentId: two.id, priority: 1, adapterId: sonnet!.id },
+    ]);
+    const svc = companyAdapterService(db);
+    await svc.consolidateCompany(companyId);
+    const rows = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId));
+    expect(rows.map((r) => [r.name, r.adapterConfig])).toEqual([["Claude Code · own auth", {}]]);
+    expect((await svc.agentList(one.id)).map((r) => r.slotConfig)).toEqual([{ model: "sonnet" }]);
+    // Two listed both: the first (opus, high) stays.
+    expect((await svc.agentList(two.id)).map((r) => r.slotConfig)).toEqual([{ model: "opus", effort: "high" }]);
+    const [twoRow] = await db.select().from(agents).where(eq(agents.id, two.id));
+    expect(twoRow!.adapterConfig).toMatchObject({ model: "opus", effort: "high", cwd: "/w/Two" });
+    await svc.consolidateCompany(companyId); // idempotent
+    expect((await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId))).length).toBe(1);
   });
 
   it("the mirror restores adapter fields that drifted on the agent row", async () => {

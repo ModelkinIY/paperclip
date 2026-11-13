@@ -1,9 +1,10 @@
 /**
  * inferdyne fork: agent inference slots.
  *
- * Adapters are company rows (company_adapters: harness, connection, model,
- * adapter settings, environment override). An agent lists adapters by
- * priority in agent_inference_slots (adapter_id). For compatibility the
+ * Adapters are company rows (company_adapters: harness, connection, adapter
+ * settings, environment override). An agent lists adapters by priority in
+ * agent_inference_slots (adapter_id) and picks its model and thinking effort
+ * for each one there (adapter_config of the slot row). For compatibility the
  * agent's own adapterType/adapterConfig/runtimeConfig.aiConnection mirror its
  * first enabled adapter (adapters.ts), and every run is claimed on one adapter.
  */
@@ -11,7 +12,7 @@ import { and, asc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import {
   agentInferenceSlots, agentInferenceSlotTaskState, agentTaskSessions, agents, companyAdapters, heartbeatRuns, inferenceExhaustions, type Db,
 } from "@paperclipai/db";
-import { readAiLimitRunWait, readInferenceSlotSelection, type AiLimitRunWait, type InferenceSlotSelection, type InferenceSlotStatus } from "@paperclipai/shared";
+import { SLOT_ADAPTER_KEYS, slotEffortKey, readAiLimitRunWait, readInferenceSlotSelection, type AiLimitRunWait, type InferenceSlotSelection, type InferenceSlotStatus } from "@paperclipai/shared";
 import { logger } from "../../middleware/logger.js";
 import { resolveBindingAccountCandidates } from "../account-capacity/gate.js";
 import { accountCapacity } from "../account-capacity/runtime.js";
@@ -51,13 +52,14 @@ export function primarySlotOf(agent: Pick<AgentRow, "adapterType" | "adapterConf
 
 /**
  * Keys of adapterConfig that belong to the agent, not to the adapter:
- * instructions, prompts, skills sync, timeouts and the agent's environment
- * variables. Everything else (cwd, model, effort, engine, permissions, turns,
- * command, args...) is the adapter's.
+ * instructions, prompts, skills sync, timeouts, working directory, max turns
+ * and the agent's environment variables. Model and effort are the agent's
+ * choice per adapter (SLOT_ADAPTER_KEYS, on agent_inference_slots). Everything
+ * else (engine, permissions, command, args...) is the adapter's.
  */
 export const AGENT_LEVEL_ADAPTER_KEYS = [
   "instructionsBundleMode", "instructionsRootPath", "instructionsEntryFile", "instructionsFilePath", "agentsMdPath",
-  "promptTemplate", "bootstrapPromptTemplate", "paperclipSkillSync", "timeoutSec", "graceSec", "env",
+  "promptTemplate", "bootstrapPromptTemplate", "paperclipSkillSync", "timeoutSec", "graceSec", "env", "cwd", "maxTurnsPerRun",
 ] as const;
 /** Env keys that pick provider/endpoint/credentials. A managed connection supplies them, so the agent's are dropped then. */
 const PROVIDER_ENV_RE = /^(ANTHROPIC_|OPENAI_|CODEX_|OPENROUTER_|XAI_|GEMINI_|GOOGLE_API|CLAUDE_CODE_USE_)/;
@@ -70,6 +72,36 @@ export function adapterLevelConfig(config: Record<string, unknown>) {
   const out = { ...config };
   for (const key of AGENT_LEVEL_ADAPTER_KEYS) delete out[key];
   return out;
+}
+
+/** What a company adapter stores: no agent-level keys, no per-agent model/effort. */
+export function sharedAdapterConfig(config: Record<string, unknown>) {
+  const out = adapterLevelConfig(config);
+  for (const key of SLOT_ADAPTER_KEYS) delete out[key];
+  return out;
+}
+
+/** The agent's model/effort for one adapter, as adapterConfig keys (empty values dropped). */
+export function slotOverrides(slotConfig: Record<string, unknown> | null | undefined) {
+  const out: Record<string, unknown> = {};
+  for (const key of SLOT_ADAPTER_KEYS) {
+    const v = slotConfig?.[key];
+    if (v !== undefined && v !== null && v !== "") out[key] = v;
+  }
+  return out;
+}
+
+/** Stored slot config from the list editor's model/effort. */
+export function slotConfigFor(adapterType: string, adapterConfig: Record<string, unknown>, model: string | null | undefined, effort: string | null | undefined) {
+  const out: Record<string, unknown> = {};
+  if (model) out.model = model;
+  if (effort) out[slotEffortKey(adapterType, adapterConfig)] = effort;
+  return out;
+}
+
+/** A company adapter as one agent runs it: shared settings plus the agent's model/effort. */
+export function adapterConfigForAgent(adapterConfig: Record<string, unknown> | null | undefined, slotConfig: Record<string, unknown> | null | undefined) {
+  return { ...sharedAdapterConfig(adapterConfig ?? {}), ...slotOverrides(slotConfig) };
 }
 
 /**
@@ -125,10 +157,10 @@ function slotModel(slot: ResolvedSlot): string | null {
   return typeof m === "string" && m ? m : null;
 }
 
-function adapterSlot(row: AdapterRow, priority: number, enabled: boolean): ResolvedSlot {
+function adapterSlot(row: AdapterRow, priority: number, enabled: boolean, slotConfig: Record<string, unknown> | null | undefined): ResolvedSlot {
   return {
     id: row.id, priority, enabled, label: row.name, adapterType: row.adapterType,
-    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
+    adapterConfig: adapterConfigForAgent(row.adapterConfig, slotConfig), aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
   };
 }
 
@@ -151,7 +183,7 @@ export function inferenceSlotService(db: Db) {
   async function allSlots(agent: AgentRow): Promise<ResolvedSlot[]> {
     const rows = await listAgentAdapters(agent.id);
     if (!rows.length) return [primarySlotOf(agent)];
-    return rows.map((r, i) => adapterSlot(r.adapter, i, r.slot.enabled));
+    return rows.map((r, i) => adapterSlot(r.adapter, i, r.slot.enabled, r.slot.adapterConfig));
   }
 
   async function resolveSlot(agent: AgentRow, slotId: string): Promise<ResolvedSlot | null> {

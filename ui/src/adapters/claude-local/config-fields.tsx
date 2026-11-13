@@ -81,6 +81,7 @@ export function ClaudeLocalAdvancedFields({
   eff,
   mark,
   managedSandboxOnly,
+  hideAgentLevel,
 }: AdapterConfigFieldsProps) {
   const rawEngine = isCreate
     ? values!.claudeEngine ?? "auto"
@@ -260,7 +261,7 @@ export function ClaudeLocalAdvancedFields({
             : mark("adapterConfig", "dangerouslySkipPermissions", v)
         }
       />
-      <Field label="Max turns per run" hint={help.maxTurnsPerRun}>
+      {!hideAgentLevel && <Field label="Max turns per run" hint={help.maxTurnsPerRun}>
         {isCreate ? (
           <input
             type="number"
@@ -280,7 +281,7 @@ export function ClaudeLocalAdvancedFields({
             className={inputClass}
           />
         )}
-      </Field>
+      </Field>}
     </>
   ));
 }

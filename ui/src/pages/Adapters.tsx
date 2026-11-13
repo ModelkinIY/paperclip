@@ -1,6 +1,6 @@
 /**
  * inferdyne fork: company adapters. Each adapter is a harness + connection +
- * model + adapter settings + environment override; agents list adapters by
+ * adapter settings + environment override; agents list adapters by
  * priority on their runtime tab. The editor is the agent adapter form in
  * standalone mode (no agent-scoped calls).
  */
@@ -30,11 +30,6 @@ export function adapterStatusText(status: CompanyAdapterView["status"]) {
   if (status.state === "hard_limit") return { text: `limit reached${until}`, tone: "text-destructive" };
   if (status.state === "soft_limit") return { text: `pacing hold${until}`, tone: "text-amber-600 dark:text-amber-400" };
   return { text: "available", tone: "text-(--status-task-done)" };
-}
-
-function modelOf(a: Pick<CompanyAdapterView, "adapterConfig">) {
-  const m = a.adapterConfig.model;
-  return typeof m === "string" && m ? m : "default model";
 }
 
 /** The form edits agents; a company adapter is shown to it as a stand-in agent. */
@@ -169,7 +164,7 @@ export function Adapters() {
               <li key={a.id}>
                 <Link to={`/adapters/${a.id}`} className={cn("flex flex-col rounded-md border border-border px-3 py-2 text-sm hover:bg-accent", selected?.id === a.id && "border-primary bg-accent")}>
                   <span className="font-medium">{a.name}</span>
-                  <span className="text-xs text-muted-foreground">{adapterLabel(a.adapterType)} · {modelOf(a)} · {a.agents.length} agent{a.agents.length === 1 ? "" : "s"}</span>
+                  <span className="text-xs text-muted-foreground">{adapterLabel(a.adapterType)} · {a.agents.length} agent{a.agents.length === 1 ? "" : "s"}</span>
                   {st ? <span className={cn("text-xs", st.tone)}>{st.text}</span> : null}
                 </Link>
               </li>
