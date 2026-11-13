@@ -1775,7 +1775,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     mark("identity", "defaultEnvironmentId", nextValue || null);
                   }}
                   options={[
-                    { value: "", label: `Default: ${inheritedEnvironmentLabel}` },
+                    { value: "", label: props.standaloneAdapter ? "No override: each agent's own environment" : `Default: ${inheritedEnvironmentLabel}` },
                     ...environmentOptions.map((environment) => ({
                       value: environment.id,
                       label: environmentDisplayLabel(environment),
