@@ -64,7 +64,7 @@ export interface CompanyAdapterView {
   aiConnection: Record<string, unknown> | null;
   defaultEnvironmentId: string | null;
   status: InferenceSlotStatus | null;
-  agents: Array<{ id: string; name: string; priority: number }>;
+  agents: Array<{ id: string; name: string; priority: number; model?: string | null }>;
   createdAt: string;
   updatedAt: string;
 }

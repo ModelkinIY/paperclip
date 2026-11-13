@@ -54,10 +54,10 @@ function asSlot(row: AdapterRow, slotConfig: Record<string, unknown> | null | un
 export function companyAdapterService(db: Db) {
   async function list(companyId: string) {
     const rows = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId)).orderBy(asc(companyAdapters.name));
-    const usage = await db.select({ adapterId: agentInferenceSlots.adapterId, agentId: agents.id, agentName: agents.name, priority: agentInferenceSlots.priority })
+    const usage = await db.select({ adapterId: agentInferenceSlots.adapterId, agentId: agents.id, agentName: agents.name, priority: agentInferenceSlots.priority, slotConfig: agentInferenceSlots.adapterConfig })
       .from(agentInferenceSlots).innerJoin(agents, eq(agents.id, agentInferenceSlots.agentId))
       .where(and(eq(agentInferenceSlots.companyId, companyId), sql`${agents.status} <> 'terminated'`));
-    return rows.map((row) => ({ ...row, agents: usage.filter((u) => u.adapterId === row.id).map((u) => ({ id: u.agentId, name: u.agentName, priority: u.priority })) }));
+    return rows.map((row) => ({ ...row, agents: usage.filter((u) => u.adapterId === row.id).map((u) => ({ id: u.agentId, name: u.agentName, priority: u.priority, model: typeof u.slotConfig?.model === "string" ? u.slotConfig.model : null })) }));
   }
 
   async function get(companyId: string, id: string) {

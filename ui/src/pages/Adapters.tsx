@@ -60,6 +60,10 @@ function AdapterEditor({ adapter, companyId, onDeleted }: { adapter: CompanyAdap
   const [name, setName] = useState(adapter.name);
   const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => { setName(adapter.name); setProblem(null); }, [adapter.id, adapter.name]);
+  // The adapter has no model of its own: test with the model its agents use (highest-priority agent first).
+  const agentModel = [...adapter.agents].sort((x, y) => x.priority - y.priority).find((x) => x.model)?.model ?? "";
+  const [testModel, setTestModel] = useState(agentModel);
+  useEffect(() => { setTestModel(agentModel); }, [adapter.id, agentModel]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["company-adapters", companyId] });
   const update = useMutation({
     mutationFn: (body: ReturnType<typeof saveBody>) => companyAdaptersApi.update(adapter.id, body),
@@ -99,12 +103,18 @@ function AdapterEditor({ adapter, companyId, onDeleted }: { adapter: CompanyAdap
           ))}</>
         ) : "Not used by any agent yet."}
       </div>
+      <label className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">Test with model
+        <input className="h-8 w-72 rounded-md border border-input bg-background px-2 font-mono text-sm" aria-label="Test with model"
+          placeholder="Harness default" value={testModel} onChange={(e) => setTestModel(e.target.value)} />
+        <span className="text-xs">Agents pick their own model on their runtime tab; this one is only for the test button.</span>
+      </label>
       {problem ? <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{problem}</div> : null}
       <AgentConfigForm
         key={adapter.id + adapter.updatedAt}
         mode="edit"
         agent={agent}
         standaloneAdapter
+        testAdapterConfig={testModel.trim() ? { model: testModel.trim() } : undefined}
         onSave={(patch) => update.mutateAsync(saveBody(adapter, patch))}
         isSaving={update.isPending}
         adapterModels={adapterModels}

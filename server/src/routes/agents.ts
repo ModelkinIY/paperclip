@@ -5522,7 +5522,7 @@ export function agentRoutes(
     }
   }
 
-  async function adapterView(row: NonNullable<Awaited<ReturnType<typeof adaptersSvc.getById>>>, agentsUsing?: Array<{ id: string; name: string; priority: number }>) {
+  async function adapterView(row: NonNullable<Awaited<ReturnType<typeof adaptersSvc.getById>>>, agentsUsing?: Array<{ id: string; name: string; priority: number; model?: string | null }>) {
     const { statuses } = await slotsSvc.slotStatuses({
       companyId: row.companyId, agentId: "-", responsibleUserId: null, store: accountCapacity, now: new Date(),
       slots: [{ id: row.id, priority: 0, enabled: true, label: row.name, adapterType: row.adapterType, adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null }],

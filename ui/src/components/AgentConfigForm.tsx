@@ -156,6 +156,8 @@ type AgentConfigFormProps = {
    * agent. `agent` is a stand-in; no agent-scoped API call is made with its id.
    */
   standaloneAdapter?: boolean;
+  /** inferdyne fork: keys merged into the config the "test" button sends (the Adapters page's test model). */
+  testAdapterConfig?: Record<string, unknown>;
 } & (
   | {
       mode: "create";
@@ -1148,7 +1150,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       return omitUndefinedEntries(next);
     }
     const base = config as Record<string, unknown>;
-    const next = { ...base, ...overlay.adapterConfig };
+    const next = { ...base, ...overlay.adapterConfig, ...(props.testAdapterConfig ?? {}) };
     if (adapterConfigPatch) {
       Object.assign(next, adapterConfigPatch);
     }
