@@ -2,7 +2,7 @@ import type { AgentAdapterListSave, CompanyAdapterSave, CompanyAdapterView } fro
 import { api } from "./client";
 
 /** inferdyne fork: company adapters (Adapters page) and agent adapter lists. */
-export type AgentAdapterView = CompanyAdapterView & { enabled: boolean; priority: number; model: string | null; effort: string | null };
+export type AgentAdapterView = CompanyAdapterView & { enabled: boolean; priority: number; model: string | null; effort: string | null; effortSupported?: boolean };
 
 export const companyAdaptersApi = {
   list: (companyId: string) => api.get<{ adapters: CompanyAdapterView[] }>(`/companies/${encodeURIComponent(companyId)}/adapters`),

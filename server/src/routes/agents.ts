@@ -5458,10 +5458,10 @@ export function agentRoutes(
     // GET returns a redacted config; any redacted leaf sent back keeps the stored value.
     let config = previous ? restoreRedactedLeaves(input.adapterConfig, previous.adapterConfig) as Record<string, unknown> : input.adapterConfig;
     // Model and effort are picked per agent (runtime tab), not stored on the adapter.
-    config = sharedAdapterConfig(config);
+    config = sharedAdapterConfig(config, adapterType);
     const normalized = sharedAdapterConfig(await normalizeMediatedAdapterConfigForPersistence({
       companyId, adapterType, adapterConfig: applyCreateDefaultsByAdapterType(adapterType, config),
-    }));
+    }), adapterType);
     let aiConnection: Record<string, unknown> | null = null;
     if (input.aiConnection) {
       const binding = aiRuntimeConnectionBindingSchema.safeParse(input.aiConnection);
@@ -5511,7 +5511,13 @@ export function agentRoutes(
       const agent = await svc.getById(u.id);
       if (!agent) continue;
       const slot = (await adaptersSvc.agentList(agent.id)).find((x) => x.adapterId === adapterId);
-      const cfg = adapterConfigForAgent(adapter.adapterConfig, slot?.slotConfig);
+      const cfg = adapterConfigForAgent(adapter.adapterType, adapter.adapterConfig, slot?.slotConfig);
+      if (!cfg.model && await connectionNeedsModel(companyId, adapter.aiConnection)) {
+        throw unprocessable(`Set a model for ${agent.name} on its runtime tab first: this connection is a custom endpoint and does not know the harness's default model`);
+      }
+      if (!isAiConnectionCompatible(binding, adapter.adapterType, cfg.model, cfg.provider, cfg.acpxAgent)) {
+        throw unprocessable(`The connection does not fit the model ${agent.name} uses on this adapter`);
+      }
       await validateManagedAgentBinding(req, companyId, agent.id, adapter.adapterType, cfg, binding, adapter.defaultEnvironmentId ?? agent.defaultEnvironmentId, false);
     }
   }
@@ -5613,12 +5619,14 @@ export function agentRoutes(
     if (!(agent.lifecycleHolds ?? []).includes("setup")) await adaptersSvc.ensureAgentAdapters(agent);
     const list = await adaptersSvc.agentList(agent.id);
     return { adapters: await Promise.all(list.map(async (r) => {
-      const own = adapterConfigForAgent({}, r.slotConfig);
+      const own = adapterConfigForAgent(r.adapter.adapterType, {}, r.slotConfig);
       const effortKey = slotEffortKey(r.adapter.adapterType, r.adapter.adapterConfig ?? {});
+      const effort = effortKey ? own[effortKey] : undefined;
       return {
         ...(await adapterView(r.adapter)), enabled: r.enabled, priority: r.priority,
         model: typeof own.model === "string" ? own.model : null,
-        effort: typeof own[effortKey] === "string" ? own[effortKey] as string : null,
+        effort: typeof effort === "string" ? effort : null,
+        effortSupported: !!effortKey,
       };
     })) };
   }
@@ -5645,7 +5653,7 @@ export function agentRoutes(
     for (const item of body.adapters) {
       const adapter = await adaptersSvc.get(existing.companyId, item.adapterId);
       if (!adapter) throw unprocessable("Unknown adapter");
-      const cfg = adapterConfigForAgent(adapter.adapterConfig, slotConfigFor(adapter.adapterType, adapter.adapterConfig ?? {}, item.model, item.effort));
+      const cfg = adapterConfigForAgent(adapter.adapterType, adapter.adapterConfig, slotConfigFor(adapter.adapterType, adapter.adapterConfig ?? {}, item.model, item.effort));
       if (!item.model && await connectionNeedsModel(existing.companyId, adapter.aiConnection ?? null)) {
         throw unprocessable(`Set a model for "${adapter.name}": its connection is a custom endpoint and does not know the harness's default model`);
       }

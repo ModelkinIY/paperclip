@@ -5,13 +5,13 @@ import { agentHarnessType } from "./agent-runner.js";
  * adapterConfig keys an agent picks per adapter on its runtime tab (model and
  * thinking effort), not stored on the company adapter.
  */
-export const SLOT_ADAPTER_KEYS = ["model", "effort", "modelReasoningEffort", "reasoningEffort", "variant", "mode", "thinking"] as const;
+export const SLOT_ADAPTER_KEYS = ["model", "effort", "modelReasoningEffort", "reasoningEffort", "variant", "thinking"] as const;
 
-/** adapterConfig key that holds the thinking effort for this harness. */
-export function slotEffortKey(adapterType: string, adapterConfig: Record<string, unknown> = {}): string {
+/** adapterConfig key that holds the thinking effort for this harness; null: no effort setting (cursor's "mode" is plan/ask, an adapter setting). */
+export function slotEffortKey(adapterType: string, adapterConfig: Record<string, unknown> = {}): string | null {
   const harness = agentHarnessType(adapterType, adapterConfig);
   if (harness === "codex_local" || (adapterType === "paperclip_runner" && harness === "claude_local")) return "modelReasoningEffort";
-  if (adapterType === "cursor") return "mode";
+  if (adapterType === "cursor") return null;
   if (adapterType === "opencode_local") return "variant";
   if (harness === "grok_local") return "reasoningEffort";
   if (adapterType === "pi_local") return "thinking";

@@ -74,34 +74,46 @@ export function adapterLevelConfig(config: Record<string, unknown>) {
   return out;
 }
 
+/** Keys an agent picks per adapter for this harness: the model and its effort key (others, e.g. ACP "mode", are adapter settings). */
+function slotKeysFor(adapterType: string | undefined, config: Record<string, unknown>): readonly string[] {
+  if (!adapterType) return SLOT_ADAPTER_KEYS;
+  const effort = slotEffortKey(adapterType, config);
+  return effort ? ["model", effort] : ["model"];
+}
+
 /** What a company adapter stores: no agent-level keys, no per-agent model/effort. */
-export function sharedAdapterConfig(config: Record<string, unknown>) {
+export function sharedAdapterConfig(config: Record<string, unknown>, adapterType: string) {
   const out = adapterLevelConfig(config);
-  for (const key of SLOT_ADAPTER_KEYS) delete out[key];
+  for (const key of slotKeysFor(adapterType, config)) delete out[key];
   return out;
 }
 
-/** The agent's model/effort for one adapter, as adapterConfig keys (empty values dropped). */
-export function slotOverrides(slotConfig: Record<string, unknown> | null | undefined) {
+/** The agent's model/effort for one adapter, as adapterConfig keys (empty values dropped). Without a type: any slot key. */
+export function slotOverrides(slotConfig: Record<string, unknown> | null | undefined, adapterType?: string) {
   const out: Record<string, unknown> = {};
-  for (const key of SLOT_ADAPTER_KEYS) {
+  for (const key of slotKeysFor(adapterType, slotConfig ?? {})) {
     const v = slotConfig?.[key];
     if (v !== undefined && v !== null && v !== "") out[key] = v;
   }
   return out;
 }
 
-/** Stored slot config from the list editor's model/effort. */
-export function slotConfigFor(adapterType: string, adapterConfig: Record<string, unknown>, model: string | null | undefined, effort: string | null | undefined) {
-  const out: Record<string, unknown> = {};
+/**
+ * Stored slot config from the list editor's model/effort. Keys the editor does
+ * not show (another harness's effort key) are kept from `previous`.
+ */
+export function slotConfigFor(adapterType: string, adapterConfig: Record<string, unknown>, model: string | null | undefined, effort: string | null | undefined, previous?: Record<string, unknown> | null) {
+  const out: Record<string, unknown> = slotOverrides(previous);
+  delete out.model;
   if (model) out.model = model;
-  if (effort) out[slotEffortKey(adapterType, adapterConfig)] = effort;
+  const key = slotEffortKey(adapterType, adapterConfig);
+  if (key) { delete out[key]; if (effort) out[key] = effort; }
   return out;
 }
 
 /** A company adapter as one agent runs it: shared settings plus the agent's model/effort. */
-export function adapterConfigForAgent(adapterConfig: Record<string, unknown> | null | undefined, slotConfig: Record<string, unknown> | null | undefined) {
-  return { ...sharedAdapterConfig(adapterConfig ?? {}), ...slotOverrides(slotConfig) };
+export function adapterConfigForAgent(adapterType: string, adapterConfig: Record<string, unknown> | null | undefined, slotConfig: Record<string, unknown> | null | undefined) {
+  return { ...sharedAdapterConfig(adapterConfig ?? {}, adapterType), ...slotOverrides(slotConfig) };
 }
 
 /**
@@ -160,7 +172,7 @@ function slotModel(slot: ResolvedSlot): string | null {
 function adapterSlot(row: AdapterRow, priority: number, enabled: boolean, slotConfig: Record<string, unknown> | null | undefined): ResolvedSlot {
   return {
     id: row.id, priority, enabled, label: row.name, adapterType: row.adapterType,
-    adapterConfig: adapterConfigForAgent(row.adapterConfig, slotConfig), aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
+    adapterConfig: adapterConfigForAgent(row.adapterType, row.adapterConfig, slotConfig), aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
   };
 }
 

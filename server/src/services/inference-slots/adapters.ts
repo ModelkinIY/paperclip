@@ -47,7 +47,7 @@ function autoName(adapterType: string, conn: string) {
 function asSlot(row: AdapterRow, slotConfig: Record<string, unknown> | null | undefined): ResolvedSlot {
   return {
     id: row.id, priority: 0, enabled: true, label: row.name, adapterType: row.adapterType,
-    adapterConfig: adapterConfigForAgent(row.adapterConfig, slotConfig), aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
+    adapterConfig: adapterConfigForAgent(row.adapterType, row.adapterConfig, slotConfig), aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
   };
 }
 
@@ -71,13 +71,13 @@ export function companyAdapterService(db: Db) {
   }
 
   async function create(companyId: string, input: AdapterInput) {
-    const [row] = await db.insert(companyAdapters).values({ companyId, ...input, adapterConfig: sharedAdapterConfig(input.adapterConfig) }).returning();
+    const [row] = await db.insert(companyAdapters).values({ companyId, ...input, adapterConfig: sharedAdapterConfig(input.adapterConfig, input.adapterType) }).returning();
     return row!;
   }
 
   /** Saves the adapter and re-mirrors every agent that has it first. */
   async function update(companyId: string, id: string, input: AdapterInput) {
-    const [row] = await db.update(companyAdapters).set({ ...input, adapterConfig: sharedAdapterConfig(input.adapterConfig), updatedAt: new Date() })
+    const [row] = await db.update(companyAdapters).set({ ...input, adapterConfig: sharedAdapterConfig(input.adapterConfig, input.adapterType), updatedAt: new Date() })
       .where(and(eq(companyAdapters.companyId, companyId), eq(companyAdapters.id, id))).returning();
     if (!row) return null;
     const users = await db.selectDistinct({ agentId: agentInferenceSlots.agentId }).from(agentInferenceSlots).where(eq(agentInferenceSlots.adapterId, id));
@@ -115,11 +115,12 @@ export function companyAdapterService(db: Db) {
       const present = ids.length ? await tx.select().from(companyAdapters)
         .where(and(eq(companyAdapters.companyId, companyId), inArray(companyAdapters.id, ids))).for("share") : [];
       if (present.length !== new Set(ids).size) throw new Error("Adapter no longer exists");
+      const before = await tx.select({ adapterId: agentInferenceSlots.adapterId, adapterConfig: agentInferenceSlots.adapterConfig }).from(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agentId));
       await tx.delete(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agentId));
       for (const [i, item] of items.entries()) {
         const adapter = present.find((a) => a.id === item.adapterId)!;
         await tx.insert(agentInferenceSlots).values({ companyId, agentId, priority: i, enabled: item.enabled, adapterId: item.adapterId,
-          adapterConfig: slotConfigFor(adapter.adapterType, adapter.adapterConfig ?? {}, item.model, item.effort) });
+          adapterConfig: slotConfigFor(adapter.adapterType, adapter.adapterConfig ?? {}, item.model, item.effort, before.find((b) => b.adapterId === item.adapterId)?.adapterConfig) });
       }
     });
     await mirrorAgent(agentId);
@@ -169,7 +170,7 @@ export function companyAdapterService(db: Db) {
     const runtimeAi = (agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection;
     const own = adapterLevelConfig((agent.adapterConfig ?? {}) as Record<string, unknown>);
     const candidates: Array<AdapterInput & { enabled: boolean; label: string | null; slotConfig: Record<string, unknown> }> = [{
-      name: "", adapterType: agent.adapterType, adapterConfig: sharedAdapterConfig(own), slotConfig: slotOverrides(own),
+      name: "", adapterType: agent.adapterType, adapterConfig: sharedAdapterConfig(own, agent.adapterType), slotConfig: slotOverrides(own, agent.adapterType),
       aiConnection: runtimeAi && typeof runtimeAi === "object" ? runtimeAi as Record<string, unknown> : null,
       defaultEnvironmentId: null, enabled: true, label: null,
     }];
@@ -177,7 +178,7 @@ export function companyAdapterService(db: Db) {
       if (!r.adapterType) continue;
       const cfg = { ...(r.adapterConfig ?? {}) } as Record<string, unknown>;
       delete cfg.env; // legacy slot env: provider keys now come from the connection
-      candidates.push({ name: "", adapterType: r.adapterType, adapterConfig: sharedAdapterConfig(cfg), slotConfig: slotOverrides(cfg), aiConnection: r.aiConnection ?? null,
+      candidates.push({ name: "", adapterType: r.adapterType, adapterConfig: sharedAdapterConfig(cfg, r.adapterType), slotConfig: slotOverrides(cfg, r.adapterType), aiConnection: r.aiConnection ?? null,
         defaultEnvironmentId: null, enabled: r.enabled, label: r.label });
     }
     const connIds = candidates.map((c) => c.aiConnection?.connectionId).filter((x): x is string => typeof x === "string");
@@ -224,17 +225,20 @@ export function companyAdapterService(db: Db) {
       const conns = await tx.select({ id: toolConnections.id, name: toolConnections.name }).from(toolConnections).where(eq(toolConnections.companyId, companyId));
       const agentRows = await tx.select({ id: agents.id, adapterType: agents.adapterType, adapterConfig: agents.adapterConfig }).from(agents).where(eq(agents.companyId, companyId));
       // 1. Model/effort move onto the agent's row; the adapter keeps shared settings only.
+      const firstRelease = new Set<string>();
       for (const a of adapters) {
         const cfg = (a.adapterConfig ?? {}) as Record<string, unknown>;
-        const shared = sharedAdapterConfig(cfg);
+        const shared = sharedAdapterConfig(cfg, a.adapterType);
         if (Object.keys(shared).length === Object.keys(cfg).length) continue;
-        const fromAdapter = slotOverrides(cfg);
+        firstRelease.add(a.id);
+        const fromAdapter = slotOverrides(cfg, a.adapterType);
         for (const s of slots.filter((x) => x.adapterId === a.id)) {
+          touched.add(s.agentId);
           if (Object.keys(slotOverrides(s.adapterConfig)).length) continue;
           // The agent row is authoritative for its first adapter (it may have been edited directly).
           const owner = agentRows.find((x) => x.id === s.agentId);
           const first = slots.filter((x) => x.agentId === s.agentId && x.enabled).sort((x, y) => x.priority - y.priority)[0];
-          const moved = owner && first?.id === s.id && owner.adapterType === a.adapterType ? slotOverrides(owner.adapterConfig as Record<string, unknown>) : fromAdapter;
+          const moved = owner && first?.id === s.id && owner.adapterType === a.adapterType ? slotOverrides(owner.adapterConfig as Record<string, unknown>, a.adapterType) : fromAdapter;
           await tx.update(agentInferenceSlots).set({ adapterConfig: moved, updatedAt: new Date() }).where(eq(agentInferenceSlots.id, s.id));
           s.adapterConfig = moved;
         }
@@ -252,8 +256,10 @@ export function companyAdapterService(db: Db) {
           touched.add(s.agentId);
           const clash = slots.find((x) => x.agentId === s.agentId && x.adapterId === keeper.id);
           if (clash) {
-            // The agent lists both: keep the higher-priority row (its model), drop the other.
-            const [keep, drop] = clash.priority <= s.priority ? [clash, s] : [s, clash];
+            // The agent lists both: keep the enabled, then higher-priority row (its model), drop the other.
+            const rank = (x: typeof s) => (x.enabled ? 0 : 1_000_000) + x.priority;
+            const [keep, drop] = rank(clash) <= rank(s) ? [clash, s] : [s, clash];
+            logger.info({ agentId: s.agentId, adapterId: keeper.id, kept: keep.adapterConfig, dropped: drop.adapterConfig }, "adapters: agent listed two adapters that merged; one model choice dropped");
             await tx.delete(agentInferenceSlots).where(eq(agentInferenceSlots.id, drop.id));
             slots.splice(slots.indexOf(drop), 1);
             if (keep === s) { await tx.update(agentInferenceSlots).set({ adapterId: keeper.id }).where(eq(agentInferenceSlots.id, s.id)); s.adapterId = keeper.id; }
@@ -263,6 +269,12 @@ export function companyAdapterService(db: Db) {
           }
         }
         await tx.execute(sql`UPDATE agent_inference_slot_task_state SET slot_id = ${keeper.id} WHERE company_id = ${companyId} AND slot_id = ${a.id}`);
+        // A hard limit on the merged adapter (no account) carries over: the later "until" wins.
+        await tx.execute(sql`INSERT INTO inference_exhaustions (company_id, key, until, observed_at, run_id, message)
+          SELECT company_id, ${"adapter:" + keeper.id}, until, observed_at, run_id, message FROM inference_exhaustions
+          WHERE company_id = ${companyId} AND key = ${"adapter:" + a.id}
+          ON CONFLICT (company_id, key) DO UPDATE SET until = GREATEST(inference_exhaustions.until, EXCLUDED.until)`);
+        await tx.execute(sql`DELETE FROM inference_exhaustions WHERE company_id = ${companyId} AND key = ${"adapter:" + a.id}`);
         await tx.delete(companyAdapters).where(eq(companyAdapters.id, a.id));
         removed.add(a.id);
       }
@@ -271,7 +283,8 @@ export function companyAdapterService(db: Db) {
       const names = new Set(kept.map((a) => a.name));
       for (const a of kept) {
         const label = ADAPTER_LABELS[a.adapterType] ?? a.adapterType;
-        const m = a.name.match(/^(.+?) · (.+?) · (.+?)(?: \(\d+\))?$/);
+        // Only names the first release generated (its adapters held a model); user names stay.
+        const m = firstRelease.has(a.id) ? a.name.match(/^(.+?) · (.+?) · (.+?)(?: \(\d+\))?$/) : null;
         if (!m || m[1] !== label) continue;
         const conn = conns.find((x) => x.id === a.aiConnection?.connectionId)?.name ?? m[3]!;
         const base = autoName(a.adapterType, conn);

@@ -24,8 +24,8 @@ type Item = { adapterId: string; enabled: boolean; model: string | null; effort:
 const inputClass = "h-8 rounded-md border border-input bg-background px-2 text-sm";
 
 /** Model and thinking effort of this agent on one adapter. */
-function ModelEffort({ adapter, companyId, item, onChange }: {
-  adapter: CompanyAdapterView; companyId: string; item: Item; onChange: (patch: Partial<Item>) => void;
+function ModelEffort({ adapter, companyId, item, effortSupported, onChange }: {
+  adapter: CompanyAdapterView; companyId: string; item: Item; effortSupported: boolean; onChange: (patch: Partial<Item>) => void;
 }) {
   const binding = aiConnectionBindingSchema.safeParse(adapter.aiConnection).data;
   const harness = agentHarnessType(adapter.adapterType, adapter.adapterConfig);
@@ -47,7 +47,7 @@ function ModelEffort({ adapter, companyId, item, onChange }: {
           value={item.model ?? ""} onChange={(e) => onChange({ model: e.target.value || null })} />
         <datalist id={listId}>{models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</datalist>
       </label>
-      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Thinking effort
+      {effortSupported ? <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Thinking effort
         {efforts.length ? (
           <select className={inputClass} aria-label={`Thinking effort for ${adapter.name}`} value={item.effort ?? ""} onChange={(e) => onChange({ effort: e.target.value || null })}>
             <option value="">Auto</option>
@@ -58,7 +58,7 @@ function ModelEffort({ adapter, companyId, item, onChange }: {
           <input className={cn(inputClass, "w-28")} aria-label={`Thinking effort for ${adapter.name}`} placeholder="Auto"
             value={item.effort ?? ""} onChange={(e) => onChange({ effort: e.target.value || null })} />
         )}
-      </label>
+      </label> : null}
     </div>
   );
 }
@@ -69,7 +69,8 @@ function MaxTurns({ agentId, companyId }: { agentId: string; companyId: string }
   const { data: agent } = useQuery({ queryKey: ["agents", "detail", agentId, "max-turns"], queryFn: () => agentsApi.get(agentId, companyId) });
   const stored = Number((agent?.adapterConfig as Record<string, unknown> | undefined)?.maxTurnsPerRun ?? 1000);
   const [value, setValue] = useState<string>("");
-  useEffect(() => { if (agent) setValue(String(stored)); }, [agent, stored]);
+  const loaded = !!agent;
+  useEffect(() => { if (loaded) setValue(String(stored)); }, [loaded, stored]);
   const save = useMutation({
     mutationFn: (n: number) => agentsApi.update(agentId, { adapterConfig: { maxTurnsPerRun: n } }, companyId),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ["agents"] }); },
@@ -133,7 +134,7 @@ export function AgentAdaptersList({ agentId, companyId }: { agentId: string; com
                 <Button variant="ghost" size="icon" aria-label="Move down" disabled={i === items.length - 1} onClick={() => move(i, 1)}><ArrowDown className="size-4" /></Button>
                 <Button variant="ghost" size="icon" aria-label="Remove" onClick={() => setDraft(items.filter((x) => x.adapterId !== item.adapterId))}><X className="size-4" /></Button>
               </div>
-              {a ? <ModelEffort adapter={a} companyId={companyId} item={item}
+              {a ? <ModelEffort adapter={a} companyId={companyId} item={item} effortSupported={a.adapterType !== "cursor"}
                 onChange={(patch) => setDraft(items.map((x) => x.adapterId === item.adapterId ? { ...x, ...patch } : x))} /> : null}
             </div>
           );
@@ -152,7 +153,7 @@ export function AgentAdaptersList({ agentId, companyId }: { agentId: string; com
           ) : null}
         </div>
         {problem ? <div className="text-destructive">{problem}</div> : null}
-        {items.some((i) => byId.get(i.adapterId)?.adapterType === "claude_local") ? <MaxTurns agentId={agentId} companyId={companyId} /> : null}
+        {items.some((i) => { const x = byId.get(i.adapterId); return !!x && agentHarnessType(x.adapterType, x.adapterConfig) === "claude_local"; }) ? <MaxTurns agentId={agentId} companyId={companyId} /> : null}
       </div>
     </AgentPanel>
   );

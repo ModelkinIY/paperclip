@@ -186,8 +186,8 @@ describeDb("inference slots", () => {
     const one = await mk("One", "sonnet");
     const two = await mk("Two", "opus", "high");
     // Rows as the first release stored them: model/effort/cwd on the adapter.
-    const [sonnet] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · sonnet · own auth", adapterType: "claude_local", adapterConfig: { model: "sonnet", cwd: "/w/One", maxTurnsPerRun: 5 } }).returning();
-    const [opus] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · opus · own auth", adapterType: "claude_local", adapterConfig: { model: "opus", effort: "high", cwd: "/w/Two" } }).returning();
+    const [sonnet] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · sonnet · own auth", adapterType: "claude_local", adapterConfig: { model: "sonnet", cwd: "/w/One", maxTurnsPerRun: 5, mode: "oneshot" } }).returning();
+    const [opus] = await db.insert(companyAdapters).values({ companyId, name: "Claude Code · opus · own auth", adapterType: "claude_local", adapterConfig: { model: "opus", effort: "high", cwd: "/w/Two", mode: "oneshot" } }).returning();
     await db.insert(agentInferenceSlots).values([
       { companyId, agentId: one.id, priority: 0, adapterId: sonnet!.id },
       { companyId, agentId: two.id, priority: 0, adapterId: opus!.id },
@@ -196,7 +196,8 @@ describeDb("inference slots", () => {
     const svc = companyAdapterService(db);
     await svc.consolidateCompany(companyId);
     const rows = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, companyId));
-    expect(rows.map((r) => [r.name, r.adapterConfig])).toEqual([["Claude Code · own auth", {}]]);
+    // ACP session mode is an adapter setting and stays.
+    expect(rows.map((r) => [r.name, r.adapterConfig])).toEqual([["Claude Code · own auth", { mode: "oneshot" }]]);
     expect((await svc.agentList(one.id)).map((r) => r.slotConfig)).toEqual([{ model: "sonnet" }]);
     // Two listed both: the first (opus, high) stays.
     expect((await svc.agentList(two.id)).map((r) => r.slotConfig)).toEqual([{ model: "opus", effort: "high" }]);
