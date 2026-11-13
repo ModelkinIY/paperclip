@@ -3957,7 +3957,7 @@ registry.registerPath({
   tags: ["agents"],
   summary: "Create a company adapter",
   request: { params: z.object({ companyId: z.string() }), body: jsonBody(companyAdapterSaveSchema) },
-  responses: { 201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
+  responses: { 422: r.unprocessable,  201: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -3966,7 +3966,7 @@ registry.registerPath({
   tags: ["agents"],
   summary: "Update a company adapter (agents that run it first are updated too)",
   request: { params: z.object({ id: z.string() }), body: jsonBody(companyAdapterSaveSchema) },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+  responses: { 422: r.unprocessable,  200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -3993,7 +3993,7 @@ registry.registerPath({
   tags: ["agents"],
   summary: "Replace the agent's adapter list (array order is priority)",
   request: { params: z.object({ id: z.string() }), body: jsonBody(agentAdapterListSaveSchema) },
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+  responses: { 422: r.unprocessable,  200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
 });
 
 registry.registerPath({

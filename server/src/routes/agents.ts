@@ -5442,6 +5442,11 @@ export function agentRoutes(
   const adaptersSvc = companyAdapterService(db);
   const slotsSvc = inferenceSlotService(db);
 
+  /** An agent runs from company adapters; a lookup failure means no (the agent's own fields stay authoritative). */
+  async function agentUsesAdapters(agentId: string) {
+    try { return (await slotsSvc.usesAdapters(agentId)) === true; } catch { return false; }
+  }
+
   async function assertCanManageAdapters(req: Request, companyId: string) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent") throw forbidden("Only an operator can manage adapters");
@@ -5508,7 +5513,7 @@ export function agentRoutes(
 
   async function adapterView(row: NonNullable<Awaited<ReturnType<typeof adaptersSvc.getById>>>, agentsUsing?: Array<{ id: string; name: string; priority: number }>) {
     const { statuses } = await slotsSvc.slotStatuses({
-      companyId: row.companyId, agentId: "", responsibleUserId: null, store: accountCapacity, now: new Date(),
+      companyId: row.companyId, agentId: "-", responsibleUserId: null, store: accountCapacity, now: new Date(),
       slots: [{ id: row.id, priority: 0, enabled: true, label: row.name, adapterType: row.adapterType, adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null }],
     }).catch(() => ({ statuses: new Map() }));
     return {
@@ -5577,6 +5582,27 @@ export function agentRoutes(
     res.status(204).end();
   });
 
+  function canonicalJson(v: unknown): string {
+    if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+    if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => (v as Record<string, unknown>)[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+    return JSON.stringify(v ?? null);
+  }
+  function assertNoAdapterFieldChange(existing: { adapterType: string; adapterConfig: unknown; runtimeConfig: unknown; defaultEnvironmentId: string | null }, body: Record<string, unknown>) {
+    const changed: string[] = [];
+    if (typeof body.adapterType === "string" && body.adapterType !== existing.adapterType) changed.push("adapterType");
+    if (body.adapterConfig && typeof body.adapterConfig === "object") {
+      const before = adapterLevelConfig((existing.adapterConfig ?? {}) as Record<string, unknown>);
+      const requested = restoreRedactedLeaves(body.adapterConfig, existing.adapterConfig) as Record<string, unknown>;
+      const after = adapterLevelConfig(body.replaceAdapterConfig === true ? requested : { ...(existing.adapterConfig as Record<string, unknown>), ...requested });
+      const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+      for (const k of keys) if (canonicalJson(before[k]) !== canonicalJson(after[k])) changed.push(`adapterConfig.${k}`);
+    }
+    const rc = body.runtimeConfig as Record<string, unknown> | undefined;
+    if (rc && "aiConnection" in rc && canonicalJson(rc.aiConnection) !== canonicalJson((existing.runtimeConfig as Record<string, unknown> | null)?.aiConnection)) changed.push("aiConnection");
+    if ("defaultEnvironmentId" in body && (body.defaultEnvironmentId ?? null) !== (existing.defaultEnvironmentId ?? null)) changed.push("defaultEnvironmentId");
+    if (changed.length) throw unprocessable(`This agent runs on adapters; change ${changed.join(", ")} on the Adapters page`, { code: "agent_uses_adapters", fields: changed });
+  }
+
   async function agentAdaptersResponse(agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
     // Setup drafts are converted once they are set up (first claim), not from a read.
     if (!(agent.lifecycleHolds ?? []).includes("setup")) await adaptersSvc.ensureAgentAdapters(agent);
@@ -5612,7 +5638,10 @@ export function agentRoutes(
         await validateManagedAgentBinding(req, existing.companyId, existing.id, adapter.adapterType, adapter.adapterConfig ?? {}, binding, adapter.defaultEnvironmentId ?? existing.defaultEnvironmentId, false);
       }
     }
-    await adaptersSvc.setAgentList(existing.companyId, existing.id, body.adapters);
+    await adaptersSvc.setAgentList(existing.companyId, existing.id, body.adapters).catch((err) => {
+      if (err instanceof Error && err.message === "Adapter no longer exists") throw conflict("An adapter was deleted meanwhile; reload and try again");
+      throw err;
+    });
     const actor = getActorInfo(req);
     await logActivity(db, { companyId: existing.companyId, actorType: actor.actorType, actorId: actor.actorId, agentId: actor.agentId, runId: actor.runId,
       action: "agent.adapters.updated", entityType: "agent", entityId: existing.id, details: { adapters: body.adapters } });
@@ -5629,6 +5658,9 @@ export function agentRoutes(
       return;
     }
 
+    // inferdyne fork: an agent with an adapter list gets harness, connection, model,
+    // adapter settings and environment from its adapters (Adapters page).
+    if (await agentUsesAdapters(existing.id)) assertNoAdapterFieldChange(existing, req.body as Record<string, unknown>);
     const runtimeSettings = req.body.runtimeSettings;
     if (runtimeSettings) await assertCanConfigureAgentSetup(req, existing);
     const patchData = runtimeSettings
@@ -5921,7 +5953,7 @@ export function agentRoutes(
       },
     };
     const command = requestedStatus === "paused" ? "pause" : requestedStatus === "idle" ? "resume" : requestedStatus === "terminated" ? "terminate" : null;
-    const agent = command
+    let agent = command
       ? await svcLifecycle.updateAndTransition(id, command, patchData, updateOptions)
       : await svc.update(id, patchData, updateOptions);
     if (!agent) {
@@ -5929,7 +5961,10 @@ export function agentRoutes(
       return;
     }
     // inferdyne fork: an agent with an adapter list takes its adapter fields from its first adapter.
-    if (await slotsSvc.usesAdapters(agent.id)) await adaptersSvc.mirrorAgent(agent.id);
+    if (await agentUsesAdapters(agent.id)) {
+      await adaptersSvc.mirrorAgent(agent.id);
+      agent = (await svc.getById(agent.id)) ?? agent;
+    }
 
     await logActivity(db, {
       companyId: agent.companyId,

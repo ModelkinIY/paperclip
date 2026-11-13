@@ -171,6 +171,22 @@ describeDb("inference slots", () => {
     expect((row.adapterConfig as Record<string, unknown>).model).toBe("qwen");
   });
 
+  it("the mirror restores adapter fields that drifted on the agent row", async () => {
+    const s = await seed();
+    // Adapter fields drifted on the agent row (e.g. an old API client) are restored by the mirror.
+    await db.update(agents).set({ adapterConfig: { model: "drifted", instructionsFilePath: "/agent/AGENTS.md" } }).where(eq(agents.id, s.agent.id));
+    await s.adapters.mirrorAgent(s.agent.id);
+    expect(((await s.agentRow()).adapterConfig as Record<string, unknown>).model).toBe("primary-model");
+  });
+
+  it("an adapter without an environment override keeps the agent's environment", async () => {
+    const s = await seed();
+    const envId = randomUUID();
+    await db.execute(sql`UPDATE agents SET default_environment_id = NULL WHERE id = ${s.agent.id}`);
+    const view = overlayAgentWithSlot({ ...(await s.agentRow()), defaultEnvironmentId: envId }, { id: s.local.id, priority: 1, enabled: true, label: null, adapterType: "claude_local", adapterConfig: {}, aiConnection: null, defaultEnvironmentId: undefined });
+    expect(view.defaultEnvironmentId).toBe(envId);
+  });
+
   it("an adapter in use cannot be deleted", async () => {
     const s = await seed();
     await expect(s.adapters.remove(s.companyId, s.local.id)).rejects.toBeInstanceOf(AdapterInUseError);
@@ -242,7 +258,7 @@ describeDb("inference slots", () => {
     await s.queuedRun("task-5");
     await s.drain();
     const [ex] = await db.select().from(inferenceExhaustions).where(eq(inferenceExhaustions.companyId, s.companyId));
-    expect(ex!.key).toBe(`slot:${s.agent.id}:${s.local.id}`);
+    expect(ex!.key).toBe(`adapter:${s.local.id}`);
   });
 
   it("a retry that carries the choice of an adapter no longer on the agent goes the agent's way", async () => {
@@ -262,7 +278,7 @@ describeDb("inference slots", () => {
     const s = await seed();
     limitSettingsStore.set(s.a.grantId, { ...DEFAULT_LIMIT_SETTINGS, enabled: true });
     accountCapacity.record(s.a.grantId, weekly(45, 40));
-    await inferenceSlotService(db).recordExhaustion({ companyId: s.companyId, key: `slot:${s.agent.id}:${s.local.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
+    await inferenceSlotService(db).recordExhaustion({ companyId: s.companyId, key: `adapter:${s.local.id}`, until: new Date(Date.now() + 3_600_000), runId: null, message: null });
     const id = await s.queuedRun("task-6");
     await s.drain();
     const run = await s.runRow(id);

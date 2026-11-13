@@ -90,6 +90,16 @@ export function slotRunAdapterConfig(agentConfig: Record<string, unknown>, adapt
   return out;
 }
 
+/** With a managed AI connection the agent's own provider env (e.g. a local ANTHROPIC_BASE_URL) is not passed on. */
+export function withManagedProviderEnvDropped<T extends Pick<AgentRow, "adapterConfig" | "runtimeConfig">>(agent: T): T {
+  if (!(agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection) return agent;
+  const cfg = recordOf(agent.adapterConfig);
+  const env = recordOf(cfg.env);
+  if (!Object.keys(env).some((k) => PROVIDER_ENV_RE.test(k))) return agent;
+  const kept = Object.fromEntries(Object.entries(env).filter(([k]) => !PROVIDER_ENV_RE.test(k)));
+  return { ...agent, adapterConfig: { ...cfg, env: kept } };
+}
+
 /** The agent as a run on `slot` sees it: adapter fields come from the adapter, everything else stays. */
 export function overlayAgentWithSlot<T extends Pick<AgentRow, "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">>(agent: T, slot: ResolvedSlot): T {
   if (slot.id === PRIMARY_SLOT_ID) return agent;
@@ -105,7 +115,9 @@ export function overlayAgentWithSlot<T extends Pick<AgentRow, "adapterType" | "a
 
 /** Exhaustion key: the account when the slot has one, else the slot itself. */
 export function exhaustionKey(agentId: string, slotId: string, grantId: string | null) {
-  return grantId ? `grant:${grantId}` : `slot:${agentId}:${slotId}`;
+  if (grantId) return `grant:${grantId}`;
+  // A company adapter is shared by agents: its limit is too. Only the legacy primary is per agent.
+  return slotId === PRIMARY_SLOT_ID ? `slot:${agentId}:${slotId}` : `adapter:${slotId}`;
 }
 
 function slotModel(slot: ResolvedSlot): string | null {
@@ -278,7 +290,8 @@ export function createInferenceSlotGate(db: Db, deps: {
       if (run.startedAt) {
         const prior = readInferenceSlotSelection(run.contextSnapshot);
         if (!prior) return "legacy";
-        return (await svc.resolveSlot(agent, prior.slotId)) ?? "legacy";
+        // A choice the agent no longer has (e.g. a pre-adapters slot id) is dropped, not executed.
+        return (await svc.resolveSlot(agent, prior.slotId)) ?? legacyOutcome(run, "legacy");
       }
       let slots: ResolvedSlot[];
       try {
@@ -302,7 +315,11 @@ export function createInferenceSlotGate(db: Db, deps: {
             return grantId ? deps.settings.get(grantId).cacheKeepaliveMode : "off";
           },
         });
-        if (!choice) return legacyOutcome(run, "legacy");
+        if (!choice) {
+          // Every adapter of the agent is off: hold instead of running the disabled one the row still mirrors.
+          logger.warn({ runId: run.id, agentId: agent.id }, "inference slots: agent has no enabled adapter; run stays queued");
+          return null;
+        }
         if (choice.kind === "wait") {
           const st = statuses.get(choice.slotId)!;
           const acct = accounts.get(choice.slotId);
@@ -387,9 +404,13 @@ export async function applySlotSelectionAtStart<T extends AgentRow>(db: Db, inpu
   const svc = inferenceSlotService(db);
   let agent = input.agent;
   if (selection.slotId !== PRIMARY_SLOT_ID) {
-    const slot = await svc.resolveSlot(input.agent, selection.slotId);
+    const slots = await svc.allSlots(input.agent);
+    const slot = slots.find((x) => x.id === selection.slotId);
     if (!slot) throw new Error("The adapter this run was claimed on was removed from the agent; start a new turn.");
-    agent = overlayAgentWithSlot(input.agent, slot);
+    // The agent's own fields mirror its first enabled adapter and stay authoritative for it
+    // (lifecycle/setup flows edit them); only a fallback adapter is overlaid.
+    const first = slots.find((x) => x.enabled);
+    agent = first?.id === slot.id ? withManagedProviderEnvDropped(input.agent) : overlayAgentWithSlot(input.agent, slot);
   }
   if (input.taskKey) {
     try {

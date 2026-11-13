@@ -81,13 +81,19 @@ export function companyAdapterService(db: Db) {
   }
 
   async function remove(companyId: string, id: string) {
-    const users = await db.select({ name: agents.name, status: agents.status }).from(agentInferenceSlots).innerJoin(agents, eq(agents.id, agentInferenceSlots.agentId))
+    return db.transaction(async (tx) => {
+    // Lock the adapter: a concurrent agent list save (FOR SHARE on it) waits or wins before we check usage.
+    const [locked] = await tx.select({ id: companyAdapters.id }).from(companyAdapters)
+      .where(and(eq(companyAdapters.companyId, companyId), eq(companyAdapters.id, id))).for("update").limit(1);
+    if (!locked) return false;
+    const users = await tx.select({ name: agents.name, status: agents.status }).from(agentInferenceSlots).innerJoin(agents, eq(agents.id, agentInferenceSlots.agentId))
       .where(eq(agentInferenceSlots.adapterId, id));
     const live = users.filter((u) => u.status !== "terminated");
     if (live.length) throw new AdapterInUseError([...new Set(live.map((u) => u.name))]);
     // Terminated agents do not hold an adapter (FK cascades their rows).
-    const [row] = await db.delete(companyAdapters).where(and(eq(companyAdapters.companyId, companyId), eq(companyAdapters.id, id))).returning({ id: companyAdapters.id });
+    const [row] = await tx.delete(companyAdapters).where(and(eq(companyAdapters.companyId, companyId), eq(companyAdapters.id, id))).returning({ id: companyAdapters.id });
     return !!row;
+    });
   }
 
   /** The agent's ordered adapter list. */
@@ -100,6 +106,10 @@ export function companyAdapterService(db: Db) {
   /** Replace the agent's list (order = priority) and mirror its first enabled adapter. */
   async function setAgentList(companyId: string, agentId: string, items: Array<{ adapterId: string; enabled: boolean }>) {
     await db.transaction(async (tx) => {
+      const ids = items.map((i) => i.adapterId);
+      const present = ids.length ? await tx.select({ id: companyAdapters.id }).from(companyAdapters)
+        .where(and(eq(companyAdapters.companyId, companyId), inArray(companyAdapters.id, ids))).for("share") : [];
+      if (present.length !== new Set(ids).size) throw new Error("Adapter no longer exists");
       await tx.delete(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agentId));
       for (const [i, item] of items.entries()) {
         await tx.insert(agentInferenceSlots).values({ companyId, agentId, priority: i, enabled: item.enabled, adapterId: item.adapterId });
@@ -153,14 +163,14 @@ export function companyAdapterService(db: Db) {
     const candidates: Array<AdapterInput & { enabled: boolean; label: string | null }> = [{
       name: "", adapterType: agent.adapterType, adapterConfig: adapterLevelConfig((agent.adapterConfig ?? {}) as Record<string, unknown>),
       aiConnection: runtimeAi && typeof runtimeAi === "object" ? runtimeAi as Record<string, unknown> : null,
-      defaultEnvironmentId: agent.defaultEnvironmentId ?? null, enabled: true, label: null,
+      defaultEnvironmentId: null, enabled: true, label: null,
     }];
     for (const r of rows) {
       if (!r.adapterType) continue;
       const cfg = { ...(r.adapterConfig ?? {}) } as Record<string, unknown>;
       delete cfg.env; // legacy slot env: provider keys now come from the connection
       candidates.push({ name: "", adapterType: r.adapterType, adapterConfig: adapterLevelConfig(cfg), aiConnection: r.aiConnection ?? null,
-        defaultEnvironmentId: agent.defaultEnvironmentId ?? null, enabled: r.enabled, label: r.label });
+        defaultEnvironmentId: null, enabled: r.enabled, label: r.label });
     }
     const connIds = candidates.map((c) => c.aiConnection?.connectionId).filter((x): x is string => typeof x === "string");
     const conns = connIds.length ? await tx.select({ id: toolConnections.id, name: toolConnections.name }).from(toolConnections).where(inArray(toolConnections.id, connIds)) : [];
