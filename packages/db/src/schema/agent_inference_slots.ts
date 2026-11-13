@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { boolean, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -38,7 +39,7 @@ export const agentInferenceSlots = pgTable("agent_inference_slots", {
   enabled: boolean("enabled").notNull().default(true),
   label: text("label"),
   /** Company adapter this slot runs (new style). Null: legacy inline slot. */
-  adapterId: uuid("adapter_id").references(() => companyAdapters.id, { onDelete: "restrict" }),
+  adapterId: uuid("adapter_id").references(() => companyAdapters.id, { onDelete: "cascade" }),
   adapterType: text("adapter_type"),
   adapterConfig: jsonb("adapter_config").$type<Record<string, unknown>>().notNull().default({}),
   /** runtimeConfig.aiConnection for this slot; null means none (self-managed auth). */
@@ -47,6 +48,7 @@ export const agentInferenceSlots = pgTable("agent_inference_slots", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   index("agent_inference_slots_agent_priority_idx").on(t.agentId, t.priority),
+  uniqueIndex("agent_inference_slots_agent_adapter_uq").on(t.agentId, t.adapterId).where(sql`${t.adapterId} IS NOT NULL`),
   foreignKey({ columns: [t.companyId, t.agentId], foreignColumns: [agents.companyId, agents.id], name: "agent_inference_slots_company_agent_fk" }).onDelete("cascade"),
 ]);
 

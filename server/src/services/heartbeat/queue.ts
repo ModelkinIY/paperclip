@@ -22,6 +22,7 @@ import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { accountCapacity, createAccountLimitGate, limitSettingsStore } from "../account-capacity/index.js";
 import { createInferenceSlotGate, overlayAgentWithSlot, type ResolvedSlot } from "../inference-slots/service.js";
+import { companyAdapterService } from "../inference-slots/adapters.js";
 import { deriveTaskKey } from "./run-preparation.js";
 import { shouldHoldNewRunForDeploy } from "../deploy-drain.js";
 import { podMutexService, type PodMutexGate, type PodMutexPass } from "../pod-mutex.js";
@@ -986,6 +987,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     store: accountCapacity, settings: limitSettingsStore,
     legacy: (run) => accountLimitGate.pass(run),
     taskKeyOf: (run) => deriveTaskKey(parseObject(run.contextSnapshot), null),
+    ensureAdapters: (agent) => companyAdapterService(db).ensureAgentAdapters(agent),
   });
   /** Slot chosen by the gate for a run being claimed (read right after the gate). */
   const selectedSlots = new Map<string, ResolvedSlot>();

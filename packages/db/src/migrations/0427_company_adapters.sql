@@ -20,5 +20,7 @@ ALTER TABLE "agent_inference_slots" ADD COLUMN IF NOT EXISTS "adapter_id" uuid;
 ALTER TABLE "agent_inference_slots" ALTER COLUMN "adapter_type" DROP NOT NULL;
 --> statement-breakpoint
 DO $$ BEGIN
-  ALTER TABLE "agent_inference_slots" ADD CONSTRAINT "agent_inference_slots_adapter_id_company_adapters_id_fk" FOREIGN KEY ("adapter_id") REFERENCES "public"."company_adapters"("id") ON DELETE restrict ON UPDATE no action;
+  ALTER TABLE "agent_inference_slots" ADD CONSTRAINT "agent_inference_slots_adapter_id_company_adapters_id_fk" FOREIGN KEY ("adapter_id") REFERENCES "public"."company_adapters"("id") ON DELETE cascade ON UPDATE no action;
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "agent_inference_slots_agent_adapter_uq" ON "agent_inference_slots" USING btree ("agent_id","adapter_id") WHERE "adapter_id" IS NOT NULL;

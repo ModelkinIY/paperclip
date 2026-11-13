@@ -42,7 +42,7 @@ function adapterKey(a: Pick<AdapterInput, "adapterType" | "adapterConfig" | "aiC
 function asSlot(row: AdapterRow): ResolvedSlot {
   return {
     id: row.id, priority: 0, enabled: true, label: row.name, adapterType: row.adapterType,
-    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? null,
+    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
   };
 }
 
@@ -81,9 +81,11 @@ export function companyAdapterService(db: Db) {
   }
 
   async function remove(companyId: string, id: string) {
-    const users = await db.select({ name: agents.name }).from(agentInferenceSlots).innerJoin(agents, eq(agents.id, agentInferenceSlots.agentId))
+    const users = await db.select({ name: agents.name, status: agents.status }).from(agentInferenceSlots).innerJoin(agents, eq(agents.id, agentInferenceSlots.agentId))
       .where(eq(agentInferenceSlots.adapterId, id));
-    if (users.length) throw new AdapterInUseError([...new Set(users.map((u) => u.name))]);
+    const live = users.filter((u) => u.status !== "terminated");
+    if (live.length) throw new AdapterInUseError([...new Set(live.map((u) => u.name))]);
+    // Terminated agents do not hold an adapter (FK cascades their rows).
     const [row] = await db.delete(companyAdapters).where(and(eq(companyAdapters.companyId, companyId), eq(companyAdapters.id, id))).returning({ id: companyAdapters.id });
     return !!row;
   }
@@ -112,18 +114,24 @@ export function companyAdapterService(db: Db) {
    * Agent-level keys (instructions, prompts, env, skills, timeouts) are kept.
    */
   async function mirrorAgent(agentId: string) {
-    const [first] = (await agentList(agentId)).filter((r) => r.enabled);
-    if (!first) return;
-    const [agent] = await db.select().from(agents).where(eq(agents.id, agentId)).limit(1);
-    if (!agent) return;
-    const slot = asSlot(first.adapter);
-    const view = overlayAgentWithSlot(agent, slot);
-    // Keep the agent's env as stored (provider keys are only dropped per run).
-    const adapterConfig = { ...view.adapterConfig, ...(agent.adapterConfig as Record<string, unknown>).env !== undefined ? { env: (agent.adapterConfig as Record<string, unknown>).env } : {} };
-    await db.update(agents).set({
-      adapterType: view.adapterType, adapterConfig, runtimeConfig: view.runtimeConfig as AgentRow["runtimeConfig"],
-      defaultEnvironmentId: view.defaultEnvironmentId, updatedAt: new Date(),
-    }).where(eq(agents.id, agentId));
+    await db.transaction(async (tx) => {
+      // Lock the agent row: a concurrent agent PATCH (env, prompts) is not overwritten with a stale read.
+      const [agent] = await tx.select().from(agents).where(eq(agents.id, agentId)).for("update").limit(1);
+      if (!agent) return;
+      const [first] = await tx.select({ adapter: companyAdapters }).from(agentInferenceSlots)
+        .innerJoin(companyAdapters, eq(companyAdapters.id, agentInferenceSlots.adapterId))
+        .where(and(eq(agentInferenceSlots.agentId, agentId), eq(agentInferenceSlots.enabled, true)))
+        .orderBy(asc(agentInferenceSlots.priority), asc(agentInferenceSlots.createdAt)).limit(1);
+      if (!first) return;
+      const view = overlayAgentWithSlot(agent, asSlot(first.adapter));
+      const own = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      // Keep the agent's env as stored (provider keys are only dropped per run).
+      const adapterConfig = { ...view.adapterConfig, ...(own.env !== undefined ? { env: own.env } : {}) };
+      await tx.update(agents).set({
+        adapterType: view.adapterType, adapterConfig, runtimeConfig: view.runtimeConfig as AgentRow["runtimeConfig"],
+        defaultEnvironmentId: view.defaultEnvironmentId, updatedAt: new Date(),
+      }).where(eq(agents.id, agentId));
+    });
   }
 
   /**
@@ -131,9 +139,14 @@ export function companyAdapterService(db: Db) {
    * inline fallback slots) become company adapters, identical ones shared.
    */
   async function ensureAgentAdapters(agent: Pick<AgentRow, "id" | "companyId" | "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">) {
-    const rows = await db.select().from(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agent.id)).orderBy(asc(agentInferenceSlots.priority));
+    return db.transaction(async (tx) => {
+    // One conversion per agent at a time (startup backfill vs. first claim vs. GET).
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"company-adapters:" + agent.id}))`);
+    const rows = await tx.select().from(agentInferenceSlots).where(eq(agentInferenceSlots.agentId, agent.id)).orderBy(asc(agentInferenceSlots.priority));
     if (rows.some((r) => r.adapterId)) return false;
-    const existing = await db.select().from(companyAdapters).where(eq(companyAdapters.companyId, agent.companyId));
+    // Adapter names are company-unique: serialize conversions within a company.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${"company-adapters-names:" + agent.companyId}))`);
+    const existing = await tx.select().from(companyAdapters).where(eq(companyAdapters.companyId, agent.companyId));
     const byKey = new Map(existing.map((a) => [adapterKey({ ...a, adapterConfig: a.adapterConfig ?? {}, aiConnection: a.aiConnection ?? null, defaultEnvironmentId: a.defaultEnvironmentId ?? null }), a]));
     const names = new Set(existing.map((a) => a.name));
     const runtimeAi = (agent.runtimeConfig as Record<string, unknown> | null)?.aiConnection;
@@ -150,7 +163,7 @@ export function companyAdapterService(db: Db) {
         defaultEnvironmentId: agent.defaultEnvironmentId ?? null, enabled: r.enabled, label: r.label });
     }
     const connIds = candidates.map((c) => c.aiConnection?.connectionId).filter((x): x is string => typeof x === "string");
-    const conns = connIds.length ? await db.select({ id: toolConnections.id, name: toolConnections.name }).from(toolConnections).where(inArray(toolConnections.id, connIds)) : [];
+    const conns = connIds.length ? await tx.select({ id: toolConnections.id, name: toolConnections.name }).from(toolConnections).where(inArray(toolConnections.id, connIds)) : [];
     const items: Array<{ adapterId: string; enabled: boolean }> = [];
     for (const c of candidates) {
       const key = adapterKey(c);
@@ -162,20 +175,19 @@ export function companyAdapterService(db: Db) {
         let name = base;
         for (let i = 2; names.has(name); i++) name = `${base} (${i})`;
         names.add(name);
-        [adapter] = await db.insert(companyAdapters).values({ companyId: agent.companyId, name, adapterType: c.adapterType, adapterConfig: c.adapterConfig, aiConnection: c.aiConnection, defaultEnvironmentId: c.defaultEnvironmentId }).returning();
+        [adapter] = await tx.insert(companyAdapters).values({ companyId: agent.companyId, name, adapterType: c.adapterType, adapterConfig: c.adapterConfig, aiConnection: c.aiConnection, defaultEnvironmentId: c.defaultEnvironmentId }).returning();
         byKey.set(key, adapter!);
       }
       if (!items.some((i) => i.adapterId === adapter!.id)) items.push({ adapterId: adapter!.id, enabled: c.enabled });
     }
-    await db.transaction(async (tx) => {
-      await tx.delete(agentInferenceSlots).where(and(eq(agentInferenceSlots.agentId, agent.id), isNull(agentInferenceSlots.adapterId)));
-      for (const [i, item] of items.entries()) {
-        await tx.insert(agentInferenceSlots).values({ companyId: agent.companyId, agentId: agent.id, priority: i, enabled: item.enabled, adapterId: item.adapterId });
-      }
-      // Task affinity of legacy slots pointed at inline slot ids / "primary": drop it, the next run picks fresh.
-      await tx.execute(sql`DELETE FROM agent_inference_slot_task_state WHERE agent_id = ${agent.id}`);
-    });
+    await tx.delete(agentInferenceSlots).where(and(eq(agentInferenceSlots.agentId, agent.id), isNull(agentInferenceSlots.adapterId)));
+    for (const [i, item] of items.entries()) {
+      await tx.insert(agentInferenceSlots).values({ companyId: agent.companyId, agentId: agent.id, priority: i, enabled: item.enabled, adapterId: item.adapterId });
+    }
+    // Task affinity of legacy slots pointed at inline slot ids / "primary": drop it, the next run picks fresh.
+    await tx.execute(sql`DELETE FROM agent_inference_slot_task_state WHERE agent_id = ${agent.id}`);
     return true;
+    });
   }
 
   /** Startup backfill for all agents of all companies; failures are logged per agent. */
@@ -183,6 +195,7 @@ export function companyAdapterService(db: Db) {
     const all = await db.select().from(agents).where(sql`${agents.status} <> 'terminated'`);
     let converted = 0;
     for (const agent of all) {
+      if ((agent.lifecycleHolds ?? []).includes("setup")) continue; // drafts are converted once set up (first claim)
       try { if (await ensureAgentAdapters(agent)) converted++; } catch (err) { logger.warn({ err, agentId: agent.id }, "adapters backfill failed for agent"); }
     }
     if (converted) logger.info({ converted }, "adapters: agents converted to company adapters");

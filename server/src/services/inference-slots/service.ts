@@ -116,7 +116,7 @@ function slotModel(slot: ResolvedSlot): string | null {
 function adapterSlot(row: AdapterRow, priority: number, enabled: boolean): ResolvedSlot {
   return {
     id: row.id, priority, enabled, label: row.name, adapterType: row.adapterType,
-    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? null,
+    adapterConfig: row.adapterConfig ?? {}, aiConnection: row.aiConnection ?? null, defaultEnvironmentId: row.defaultEnvironmentId ?? undefined,
   };
 }
 
@@ -246,6 +246,8 @@ export function createInferenceSlotGate(db: Db, deps: {
   settings: LimitSettingsStore;
   legacy: (run: RunRow) => Promise<boolean>;
   taskKeyOf: (run: RunRow) => string | null;
+  /** Converts an agent without an adapter list (adapters.ts ensureAgentAdapters). */
+  ensureAdapters?: (agent: AgentRow) => Promise<unknown>;
   policy?: SoftLimitPolicy;
   now?: () => Date;
 }) {
@@ -280,6 +282,8 @@ export function createInferenceSlotGate(db: Db, deps: {
       }
       let slots: ResolvedSlot[];
       try {
+        // Agents created after the startup backfill get their adapter list on first claim.
+        if (!(await svc.usesAdapters(agent.id)) && deps.ensureAdapters && !(agent.lifecycleHolds ?? []).includes("setup")) await deps.ensureAdapters(agent).catch((err) => logger.warn({ err, agentId: agent.id }, "adapters: on-claim conversion failed"));
         if (!(await svc.usesAdapters(agent.id))) return legacyOutcome(run, (await deps.legacy(run)) ? "legacy" : null);
         slots = await svc.allSlots(agent);
       } catch (err) {

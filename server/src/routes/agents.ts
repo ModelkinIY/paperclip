@@ -5450,7 +5450,8 @@ export function agentRoutes(
 
   async function prepareAdapterInput(req: Request, companyId: string, input: CompanyAdapterSave, previous: { adapterConfig: Record<string, unknown> } | null) {
     const adapterType = await assertSelectableAdapterType(input.adapterType, input.adapterConfig, companyId);
-    let config = previous ? restoreRedactedAgentEnv(input.adapterConfig, previous.adapterConfig) : input.adapterConfig;
+    // GET returns a redacted config; any redacted leaf sent back keeps the stored value.
+    let config = previous ? restoreRedactedLeaves(input.adapterConfig, previous.adapterConfig) as Record<string, unknown> : input.adapterConfig;
     config = adapterLevelConfig(config);
     const normalized = adapterLevelConfig(await normalizeMediatedAdapterConfigForPersistence({
       companyId, adapterType, adapterConfig: applyCreateDefaultsByAdapterType(adapterType, config),
@@ -5481,6 +5482,28 @@ export function agentRoutes(
       });
     }
     return { name: input.name.trim(), adapterType, adapterConfig: normalized, aiConnection, defaultEnvironmentId: input.defaultEnvironmentId ?? null };
+  }
+
+  function restoreRedactedLeaves(requested: unknown, existing: unknown): unknown {
+    if (requested === REDACTED_EVENT_VALUE) return existing;
+    if (Array.isArray(requested)) return requested.map((v, i) => restoreRedactedLeaves(v, Array.isArray(existing) ? existing[i] : undefined));
+    if (requested && typeof requested === "object") {
+      const ex = existing && typeof existing === "object" && !Array.isArray(existing) ? existing as Record<string, unknown> : {};
+      return Object.fromEntries(Object.entries(requested as Record<string, unknown>).map(([k, v]) => [k, restoreRedactedLeaves(v, ex[k])]));
+    }
+    return requested;
+  }
+
+  /** Every agent that lists the adapter must be allowed to use its connection. */
+  async function assertAgentsMayUseAdapter(req: Request, companyId: string, adapterId: string, adapter: { adapterType: string; adapterConfig: Record<string, unknown>; aiConnection: Record<string, unknown> | null; defaultEnvironmentId: string | null }) {
+    const binding = aiRuntimeConnectionBindingSchema.safeParse(adapter.aiConnection).data;
+    if (!binding || binding.mode === "router") return;
+    const users = (await adaptersSvc.list(companyId)).find((a) => a.id === adapterId)?.agents ?? [];
+    for (const u of users) {
+      const agent = await svc.getById(u.id);
+      if (!agent) continue;
+      await validateManagedAgentBinding(req, companyId, agent.id, adapter.adapterType, adapter.adapterConfig, binding, adapter.defaultEnvironmentId ?? agent.defaultEnvironmentId, false);
+    }
   }
 
   async function adapterView(row: NonNullable<Awaited<ReturnType<typeof adaptersSvc.getById>>>, agentsUsing?: Array<{ id: string; name: string; priority: number }>) {
@@ -5526,6 +5549,7 @@ export function agentRoutes(
     if (!existing) throw notFound("Adapter not found");
     await assertCanManageAdapters(req, existing.companyId);
     const input = await prepareAdapterInput(req, existing.companyId, req.body as CompanyAdapterSave, { adapterConfig: existing.adapterConfig ?? {} });
+    await assertAgentsMayUseAdapter(req, existing.companyId, existing.id, input);
     const row = await adaptersSvc.update(existing.companyId, existing.id, input).catch((err) => {
       if (String((err as { code?: string }).code) === "23505") throw conflict("An adapter with this name already exists");
       throw err;
@@ -5554,7 +5578,8 @@ export function agentRoutes(
   });
 
   async function agentAdaptersResponse(agent: NonNullable<Awaited<ReturnType<typeof svc.getById>>>) {
-    await adaptersSvc.ensureAgentAdapters(agent);
+    // Setup drafts are converted once they are set up (first claim), not from a read.
+    if (!(agent.lifecycleHolds ?? []).includes("setup")) await adaptersSvc.ensureAgentAdapters(agent);
     const list = await adaptersSvc.agentList(agent.id);
     return { adapters: await Promise.all(list.map(async (r) => ({ ...(await adapterView(r.adapter)), enabled: r.enabled, priority: r.priority }))) };
   }
@@ -5903,6 +5928,8 @@ export function agentRoutes(
       res.status(404).json({ error: "Agent not found" });
       return;
     }
+    // inferdyne fork: an agent with an adapter list takes its adapter fields from its first adapter.
+    if (await slotsSvc.usesAdapters(agent.id)) await adaptersSvc.mirrorAgent(agent.id);
 
     await logActivity(db, {
       companyId: agent.companyId,
