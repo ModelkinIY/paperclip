@@ -831,6 +831,7 @@ export function App() {
           <Route path="status-cards/:cardId" element={<UnprefixedBoardRedirect />} />
           <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
           <Route path="audit" element={<UnprefixedBoardRedirect />} />
+          <Route path="adapters/:adapterId" element={<UnprefixedBoardRedirect />} />
           {streamlinedUiEnabled ? (
             <>
               <Route path="audit/*" element={<UnprefixedBoardRedirect />} />
