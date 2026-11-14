@@ -13,6 +13,7 @@ const mockAuthApi = vi.hoisted(() => ({
   signUpEmail: vi.fn(),
   getProfile: vi.fn(),
   updateProfile: vi.fn(),
+  changePassword: vi.fn(),
   signOut: vi.fn(),
 }));
 

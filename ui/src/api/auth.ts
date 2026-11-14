@@ -201,6 +201,10 @@ export const authApi = {
     return currentUserProfileSchema.parse(payload);
   },
 
+  changePassword: async (input: { currentPassword: string; newPassword: string; revokeOtherSessions?: boolean }) => {
+    await authPost("/change-password", input);
+  },
+
   updateProfile: async (input: UpdateCurrentUserProfile): Promise<CurrentUserProfile> =>
     authPatch("/profile", input, (payload) => currentUserProfileSchema.parse(payload)),
 

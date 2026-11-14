@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Camera, LoaderCircle, Save, Trash2, UserRoundPen } from "lucide-react";
+import { Camera, KeyRound, LoaderCircle, Save, Trash2, UserRoundPen } from "lucide-react";
 import type { AuthSession, CurrentUserProfile, UpdateCurrentUserProfile } from "@paperclipai/shared";
 import { authApi } from "@/api/auth";
 import { assetsApi } from "@/api/assets";
@@ -270,8 +270,122 @@ export function ProfileSettings() {
           </div>
         </form>
 
+        <ChangePasswordForm />
+
         <InboxAgentPolicyControl companyId={selectedCompanyId} />
       </section>
     </div>
+  );
+}
+
+const MIN_PASSWORD_LENGTH = 8;
+
+export function ChangePasswordForm() {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [revokeOtherSessions, setRevokeOtherSessions] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  const mutation = useMutation({
+    mutationFn: () => authApi.changePassword({ currentPassword, newPassword, revokeOtherSessions }),
+    onSuccess: () => {
+      setError(null);
+      setDone(true);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    },
+    onError: (err) => {
+      setDone(false);
+      const message = err instanceof Error ? err.message : "";
+      setError(/invalid password/i.test(message) ? "Current password is incorrect." : message || "Failed to change password.");
+    },
+  });
+
+  const mismatch = confirmPassword.length > 0 && newPassword !== confirmPassword;
+  const tooShort = newPassword.length > 0 && newPassword.length < MIN_PASSWORD_LENGTH;
+  const canSubmit =
+    currentPassword.length > 0 &&
+    newPassword.length >= MIN_PASSWORD_LENGTH &&
+    newPassword === confirmPassword &&
+    !mutation.isPending;
+
+  return (
+    <form
+      className="space-y-4 rounded-(--rad-24) border border-border/70 p-5"
+      aria-label="Change password"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!canSubmit) return;
+        setDone(false);
+        mutation.mutate();
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <KeyRound className="h-4 w-4 text-muted-foreground" />
+        <h2 className="text-base font-semibold">Change password</h2>
+      </div>
+
+      {error ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>
+      ) : null}
+      {done ? (
+        <div className="rounded-md border border-border bg-muted/40 px-3 py-2 text-sm">Password changed.</div>
+      ) : null}
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="space-y-2">
+          <Label htmlFor="current-password">Current password</Label>
+          <Input
+            id="current-password"
+            type="password"
+            autoComplete="current-password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="new-password">New password</Label>
+          <Input
+            id="new-password"
+            type="password"
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+          />
+          {tooShort ? (
+            <p className="text-xs text-destructive">At least {MIN_PASSWORD_LENGTH} characters.</p>
+          ) : null}
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="confirm-password">Repeat new password</Label>
+          <Input
+            id="confirm-password"
+            type="password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+          {mismatch ? <p className="text-xs text-destructive">Passwords do not match.</p> : null}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={revokeOtherSessions}
+            onChange={(event) => setRevokeOtherSessions(event.target.checked)}
+          />
+          Sign out other devices
+        </label>
+        <Button type="submit" disabled={!canSubmit}>
+          {mutation.isPending ? <LoaderCircle className="size-4 animate-spin" /> : <KeyRound className="size-4" />}
+          {mutation.isPending ? "Changing..." : "Change password"}
+        </Button>
+      </div>
+    </form>
   );
 }
